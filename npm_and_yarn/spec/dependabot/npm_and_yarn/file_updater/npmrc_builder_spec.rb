@@ -133,8 +133,11 @@ RSpec.describe Dependabot::NpmAndYarn::FileUpdater::NpmrcBuilder do
       end
 
       context "with a private source used for some dependencies" do
+  <<<<<<< jurre/multiple-gpr-scopes
+  =======
         let(:dependency_files) { project_dependency_files("yarn/private_source") }
 
+  >>>>>>> main
         it { is_expected.to eq("") }
 
         context "and some credentials" do
@@ -196,7 +199,26 @@ RSpec.describe Dependabot::NpmAndYarn::FileUpdater::NpmrcBuilder do
               expect(npmrc_content).
                 to eq("@dependabot:registry=https://npm.fury.io/dependabot/\n"\
                       "//npm.fury.io/dependabot/:_authToken=my_token\n"\
-                      "//npm.fury.io/dep/:_authToken=my_other_token")
+                      "//npm.fury.io/dep/:_authToken=my_other_token\n")
+            end
+
+            context "using GitHub Package Registry" do
+              let(:files) { project_dependency_files("yarn/private_source_multiple_scopes") }
+
+              let(:credentials) do
+                [{
+                  "type" => "npm_registry",
+                  "registry" => "npm.pkg.github.com/",
+                  "token" => "token"
+                }]
+              end
+
+              it "adds auth details, and scopes them correctly for multiple scopes" do
+                expect(npmrc_content).
+                  to eq("@dependabot:registry=https://npm.pkg.github.com/\n"\
+                        "@jurre:registry=https://npm.pkg.github.com/\n"\
+                        "//npm.pkg.github.com/:_authToken=token")
+              end
             end
 
             context "using bintray" do
