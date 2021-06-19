@@ -22,11 +22,13 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
       dependency_files: dependency_files,
       credentials: credentials,
       ignored_versions: ignored_versions,
+      raise_on_ignored: raise_on_ignored,
       security_advisories: security_advisories
     )
   end
 
   let(:ignored_versions) { [] }
+  let(:raise_on_ignored) { false }
   let(:security_advisories) { [] }
   let(:credentials) do
     [{
@@ -109,7 +111,7 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
           "content-type" => "application/x-git-upload-pack-advertisement"
         }
         stub_request(:get, git_url + "/info/refs?service=git-upload-pack").
-          with(basic_auth: ["x-access-token", "token"]).
+          with(basic_auth: %w(x-access-token token)).
           to_return(
             status: 200,
             body: fixture("git", "upload_packs", "utf8-ranges"),
@@ -185,6 +187,30 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
     end
   end
 
+  describe "#lowest_security_fix_version" do
+    subject { checker.lowest_security_fix_version }
+
+    it "finds the lowest available non-vulnerable version" do
+      is_expected.to eq(Gem::Version.new("0.1.39"))
+    end
+
+    context "with a security vulnerability" do
+      let(:security_advisories) do
+        [
+          Dependabot::SecurityAdvisory.new(
+            dependency_name: dependency_name,
+            package_manager: "cargo",
+            vulnerable_versions: ["<= 0.1.39"]
+          )
+        ]
+      end
+
+      it "finds the lowest available non-vulnerable version" do
+        is_expected.to eq(Gem::Version.new("0.1.40"))
+      end
+    end
+  end
+
   describe "#latest_resolvable_version" do
     subject { checker.latest_resolvable_version }
 
@@ -201,6 +227,14 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
       it { is_expected.to eq(Gem::Version.new("0.1.39")) }
     end
 
+    context "when all versions are being ignored" do
+      let(:ignored_versions) { [">= 0"] }
+      let(:raise_on_ignored) { true }
+      it "raises an error" do
+        expect { subject }.to raise_error(Dependabot::AllVersionsIgnored)
+      end
+    end
+
     context "with a git dependency" do
       before do
         git_url = "https://github.com/BurntSushi/utf8-ranges.git"
@@ -208,7 +242,7 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
           "content-type" => "application/x-git-upload-pack-advertisement"
         }
         stub_request(:get, git_url + "/info/refs?service=git-upload-pack").
-          with(basic_auth: ["x-access-token", "token"]).
+          with(basic_auth: %w(x-access-token token)).
           to_return(
             status: 200,
             body: fixture("git", "upload_packs", "utf8-ranges"),
@@ -237,7 +271,7 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
         }
       end
 
-      it { is_expected.to eq("b7c73859eb0507d378b9d0a4d9ae2a0c653267f7") }
+      it { is_expected.to eq("8d38a931b7e34f9da339c058cbbca6ded624ea58") }
 
       context "with a tag" do
         let(:manifest_fixture_name) { "git_dependency_with_tag" }
@@ -268,7 +302,7 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
           }
         end
 
-        it { is_expected.to eq("b7c73859eb0507d378b9d0a4d9ae2a0c653267f7") }
+        it { is_expected.to eq("8d38a931b7e34f9da339c058cbbca6ded624ea58") }
       end
     end
 
@@ -352,7 +386,7 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
           "content-type" => "application/x-git-upload-pack-advertisement"
         }
         stub_request(:get, git_url + "/info/refs?service=git-upload-pack").
-          with(basic_auth: ["x-access-token", "token"]).
+          with(basic_auth: %w(x-access-token token)).
           to_return(
             status: 200,
             body: fixture("git", "upload_packs", "utf8-ranges"),
@@ -360,7 +394,7 @@ RSpec.describe Dependabot::Cargo::UpdateChecker do
           )
       end
 
-      it { is_expected.to eq("b7c73859eb0507d378b9d0a4d9ae2a0c653267f7") }
+      it { is_expected.to eq("8d38a931b7e34f9da339c058cbbca6ded624ea58") }
 
       context "with a tag" do
         let(:manifest_fixture_name) { "git_dependency_with_tag" }

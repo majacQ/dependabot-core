@@ -447,7 +447,7 @@ RSpec.describe Dependabot::Docker::FileParser do
         end
       end
 
-      context "that are idential" do
+      context "that are identical" do
         let(:dockerfile_fixture_name) { "multiple_identical" }
 
         its(:length) { is_expected.to eq(1) }
@@ -579,8 +579,8 @@ RSpec.describe Dependabot::Docker::FileParser do
     end
 
     context "with multiple dockerfiles" do
-      let(:files) { [dockerfile, dockefile2] }
-      let(:dockefile2) do
+      let(:files) { [dockerfile, dockerfile2] }
+      let(:dockerfile2) do
         Dependabot::DependencyFile.new(
           name: "custom-name",
           content: dockerfile_body2
@@ -624,6 +624,29 @@ RSpec.describe Dependabot::Docker::FileParser do
           expect(dependency).to be_a(Dependabot::Dependency)
           expect(dependency.name).to eq("my-fork/ubuntu")
           expect(dependency.version).to eq("17.04")
+          expect(dependency.requirements).to eq(expected_requirements)
+        end
+      end
+    end
+
+    context "with a platform" do
+      let(:dockerfile_body) { "FROM --platform=linux/amd64 ubuntu:artful" }
+
+      describe "the first dependency" do
+        subject(:dependency) { dependencies.first }
+        let(:expected_requirements) do
+          [{
+            requirement: nil,
+            groups: [],
+            file: "Dockerfile",
+            source: { tag: "artful" }
+          }]
+        end
+
+        it "has the right details" do
+          expect(dependency).to be_a(Dependabot::Dependency)
+          expect(dependency.name).to eq("ubuntu")
+          expect(dependency.version).to eq("artful")
           expect(dependency.requirements).to eq(expected_requirements)
         end
       end

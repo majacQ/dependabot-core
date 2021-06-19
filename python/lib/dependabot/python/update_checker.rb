@@ -3,12 +3,14 @@
 require "excon"
 require "toml-rb"
 
+require "dependabot/dependency"
 require "dependabot/update_checkers"
 require "dependabot/update_checkers/base"
 require "dependabot/shared_helpers"
 require "dependabot/errors"
 require "dependabot/python/requirement"
 require "dependabot/python/requirement_parser"
+require "dependabot/python/name_normaliser"
 
 module Dependabot
   module Python
@@ -16,6 +18,7 @@ module Dependabot
       require_relative "update_checker/poetry_version_resolver"
       require_relative "update_checker/pipenv_version_resolver"
       require_relative "update_checker/pip_compile_version_resolver"
+      require_relative "update_checker/pip_version_resolver"
       require_relative "update_checker/requirements_updater"
       require_relative "update_checker/latest_version_finder"
 
@@ -45,10 +48,7 @@ module Dependabot
               requirement: unlocked_requirement_string
             )
           when :requirements
-            # pip doesn't (yet) do any dependency resolution, so if we don't
-            # have a Pipfile or a pip-compile file, we just return the latest
-            # version.
-            latest_version
+            pip_version_resolver.latest_resolvable_version
           else raise "Unexpected resolver type #{resolver_type}"
           end
       end
@@ -69,17 +69,19 @@ module Dependabot
               requirement: current_requirement_string
             )
           when :requirements
-            latest_pip_version_with_no_unlock
+            pip_version_resolver.latest_resolvable_version_with_no_unlock
           else raise "Unexpected resolver type #{resolver_type}"
           end
+      end
+
+      def lowest_security_fix_version
+        latest_version_finder.lowest_security_fix_version
       end
 
       def lowest_resolvable_security_fix_version
         raise "Dependency not vulnerable!" unless vulnerable?
 
-        if defined?(@lowest_resolvable_security_fix_version)
-          return @lowest_resolvable_security_fix_version
-        end
+        return @lowest_resolvable_security_fix_version if defined?(@lowest_resolvable_security_fix_version)
 
         @lowest_resolvable_security_fix_version =
           fetch_lowest_resolvable_security_fix_version
@@ -96,9 +98,7 @@ module Dependabot
 
       def requirements_update_strategy
         # If passed in as an option (in the base class) honour that option
-        if @requirements_update_strategy
-          return @requirements_update_strategy.to_sym
-        end
+        return @requirements_update_strategy.to_sym if @requirements_update_strategy
 
         # Otherwise, check if this is a poetry library or not
         poetry_library? ? :widen_ranges : :bump_versions
@@ -119,9 +119,10 @@ module Dependabot
       end
 
       def fetch_lowest_resolvable_security_fix_version
-        fix_version = latest_version_finder.lowest_security_fix_version
+        fix_version = lowest_security_fix_version
         return latest_resolvable_version if fix_version.nil?
-        return fix_version if resolver_type == :requirements
+
+        return pip_version_resolver.lowest_resolvable_security_fix_version if resolver_type == :requirements
 
         resolver =
           case resolver_type
@@ -174,16 +175,27 @@ module Dependabot
       end
 
       def pipenv_version_resolver
-        @pipenv_version_resolver ||= PipenvVersionResolver.new(resolver_args)
+        @pipenv_version_resolver ||= PipenvVersionResolver.new(**resolver_args)
       end
 
       def pip_compile_version_resolver
         @pip_compile_version_resolver ||=
-          PipCompileVersionResolver.new(resolver_args)
+          PipCompileVersionResolver.new(**resolver_args)
       end
 
       def poetry_version_resolver
-        @poetry_version_resolver ||= PoetryVersionResolver.new(resolver_args)
+        @poetry_version_resolver ||= PoetryVersionResolver.new(**resolver_args)
+      end
+
+      def pip_version_resolver
+        @pip_version_resolver ||= PipVersionResolver.new(
+          dependency: dependency,
+          dependency_files: dependency_files,
+          credentials: credentials,
+          ignored_versions: ignored_versions,
+          raise_on_ignored: @raise_on_ignored,
+          security_advisories: security_advisories
+        )
       end
 
       def resolver_args
@@ -243,16 +255,13 @@ module Dependabot
         latest_version_finder.latest_version
       end
 
-      def latest_pip_version_with_no_unlock
-        latest_version_finder.latest_version_with_no_unlock
-      end
-
       def latest_version_finder
         @latest_version_finder ||= LatestVersionFinder.new(
           dependency: dependency,
           dependency_files: dependency_files,
           credentials: credentials,
           ignored_versions: ignored_versions,
+          raise_on_ignored: @raise_on_ignored,
           security_advisories: security_advisories
         )
       end
@@ -266,7 +275,7 @@ module Dependabot
         return false unless details
 
         index_response = Excon.get(
-          "https://pypi.org/pypi/#{normalised_name(details['name'])}/json",
+          "https://pypi.org/pypi/#{normalised_name(details['name'])}/json/",
           idempotent: true,
           **SharedHelpers.excon_defaults
         )
@@ -279,9 +288,8 @@ module Dependabot
         false
       end
 
-      # See https://www.python.org/dev/peps/pep-0503/#normalized-names
       def normalised_name(name)
-        name.downcase.gsub(/[-_.]+/, "-")
+        NameNormaliser.normalise(name)
       end
 
       def pipfile
@@ -311,5 +319,4 @@ module Dependabot
   end
 end
 
-Dependabot::UpdateCheckers.
-  register("pip", Dependabot::Python::UpdateChecker)
+Dependabot::UpdateCheckers.register("pip", Dependabot::Python::UpdateChecker)

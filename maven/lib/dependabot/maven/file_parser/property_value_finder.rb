@@ -15,7 +15,7 @@ module Dependabot
       class PropertyValueFinder
         require_relative "repositories_finder"
 
-        DOT_SEPARATOR_REGEX = %r{\.(?!\d+([.\/_]|$)+)}.freeze
+        DOT_SEPARATOR_REGEX = %r{\.(?!\d+([.\/_\-]|$)+)}.freeze
 
         def initialize(dependency_files:)
           @dependency_files = dependency_files
@@ -39,12 +39,13 @@ module Dependabot
               break unless nm.match?(DOT_SEPARATOR_REGEX)
 
               nm = nm.sub(DOT_SEPARATOR_REGEX, "/")
+
+            rescue Nokogiri::XML::XPath::SyntaxError => e
+              raise DependencyFileNotEvaluatable, e.message
             end
 
           # If we found a property, return it
-          if node
-            return { file: pom.name, node: node, value: node.content.strip }
-          end
+          return { file: pom.name, node: node, value: node.content.strip } if node
 
           # Otherwise, look for a value in this pom's parent
           return unless (parent = parent_pom(pom))
@@ -65,8 +66,8 @@ module Dependabot
           @internal_dependency_poms = {}
           dependency_files.each do |pom|
             doc = Nokogiri::XML(pom.content)
-            group_id    = doc.at_css("project > groupId") ||
-                          doc.at_css("project > parent > groupId")
+            group_id = doc.at_css("project > groupId") ||
+                       doc.at_css("project > parent > groupId")
             artifact_id = doc.at_css("project > artifactId")
 
             next unless group_id && artifact_id
@@ -86,6 +87,7 @@ module Dependabot
           property_name.sub(/^pom\./, "").sub(/^project\./, "")
         end
 
+        # rubocop:disable Metrics/PerceivedComplexity
         def parent_pom(pom)
           doc = Nokogiri::XML(pom.content)
           doc.remove_namespaces!
@@ -98,14 +100,13 @@ module Dependabot
 
           name = [group_id, artifact_id].join(":")
 
-          if internal_dependency_poms[name]
-            return internal_dependency_poms[name]
-          end
+          return internal_dependency_poms[name] if internal_dependency_poms[name]
 
           return unless version && !version.include?(",")
 
           fetch_remote_parent_pom(group_id, artifact_id, version, pom)
         end
+        # rubocop:enable Metrics/PerceivedComplexity
 
         def parent_repository_urls(pom)
           repositories_finder.repository_urls(
@@ -142,7 +143,7 @@ module Dependabot
 
             return dependency_file
           rescue Excon::Error::Socket, Excon::Error::Timeout,
-                 URI::InvalidURIError
+                 Excon::Error::TooManyRedirects, URI::InvalidURIError
             nil
           end
 

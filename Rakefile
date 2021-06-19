@@ -9,6 +9,7 @@ require "shellwords"
 require "rubygems/package"
 require "bundler"
 require "./common/lib/dependabot/version"
+require "yaml"
 
 GEMSPECS = %w(
   common/dependabot-common.gemspec
@@ -16,6 +17,7 @@ GEMSPECS = %w(
   terraform/dependabot-terraform.gemspec
   docker/dependabot-docker.gemspec
   git_submodules/dependabot-git_submodules.gemspec
+  github_actions/dependabot-github_actions.gemspec
   nuget/dependabot-nuget.gemspec
   gradle/dependabot-gradle.gemspec
   maven/dependabot-maven.gemspec
@@ -35,24 +37,7 @@ def run_command(command)
   exit 1 unless system(command)
 end
 
-namespace :ci do
-  task :rubocop do
-    packages = changed_packages
-    puts "Running rubocop on: #{packages.join(', ')}"
-    packages.each do |package|
-      run_command("cd #{package} && bundle exec rubocop")
-    end
-  end
-
-  task :rspec do
-    packages = changed_packages
-    puts "Running rspec on: #{packages.join(', ')}"
-    packages.each do |package|
-      run_command("cd #{package} && bundle exec rspec spec")
-    end
-  end
-end
-
+# rubocop:disable Metrics/BlockLength
 namespace :gems do
   task build: :clean do
     root_path = Dir.getwd
@@ -88,8 +73,8 @@ namespace :gems do
           begin
             sh "gem push #{gem_path}"
             break
-          rescue => err
-            puts "! `gem push` failed with error: #{err}"
+          rescue StandardError => e
+            puts "! `gem push` failed with error: #{e}"
             raise if attempts >= 3
           end
         end
@@ -99,6 +84,25 @@ namespace :gems do
 
   task :clean do
     FileUtils.rm(Dir["pkg/*.gem"])
+  end
+end
+
+class Hash
+  def sort_by_key(recursive = false, &block)
+    keys.sort(&block).each_with_object({}) do |key, seed|
+      seed[key] = self[key]
+      seed[key] = seed[key].sort_by_key(true, &block) if recursive && seed[key].is_a?(Hash)
+      seed
+    end
+  end
+end
+
+namespace :rubocop do
+  task :sort do
+    File.write(
+      ".rubocop.yml",
+      YAML.load_file(".rubocop.yml").sort_by_key(true).to_yaml
+    )
   end
 end
 
@@ -124,7 +128,6 @@ def rubygems_release_exists?(name, version)
   existing_versions.include?(version)
 end
 
-# rubocop:disable Metrics/MethodLength
 def changed_packages
   all_packages = GEMSPECS.
                  select { |gs| gs.include?("/") }.
@@ -162,9 +165,9 @@ def changed_packages
 
   packages
 end
-# rubocop:enable Metrics/MethodLength
 
 def commit_range_changes_paths?(range, paths)
   cmd = %w(git diff --quiet) + [range, "--"] + paths
   !system(Shellwords.join(cmd))
 end
+# rubocop:enable Metrics/BlockLength

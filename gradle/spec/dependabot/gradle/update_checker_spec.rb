@@ -142,6 +142,49 @@ RSpec.describe Dependabot::Gradle::UpdateChecker do
 
       it { is_expected.to eq(version_class.new("23.0")) }
     end
+
+    context "with a git source" do
+      let(:dependency_requirements) do
+        [{
+          file: "build.gradle",
+          requirement: nil,
+          groups: ["dependencies"],
+          source: {
+            type: "git",
+            url: "https://github.com/heremaps/oksse.git",
+            branch: nil
+          }
+        }]
+      end
+      let(:dependency_name) { "com.github.heremaps:oksse" }
+      let(:dependency_version) { "af885e2e890b9ef0875edd2b117305119ee5bdc5" }
+
+      it { is_expected.to be_nil }
+    end
+  end
+
+  describe "#lowest_security_fix_version" do
+    subject { checker.lowest_security_fix_version }
+
+    it "finds the lowest available non-vulnerable version" do
+      is_expected.to eq(version_class.new("23.4-jre"))
+    end
+
+    context "with a security vulnerability" do
+      let(:security_advisories) do
+        [
+          Dependabot::SecurityAdvisory.new(
+            dependency_name: dependency_name,
+            package_manager: "gradle",
+            vulnerable_versions: ["< 23.5.0"]
+          )
+        ]
+      end
+
+      it "finds the lowest available non-vulnerable version" do
+        is_expected.to eq(version_class.new("23.5-jre"))
+      end
+    end
   end
 
   describe "#latest_resolvable_version" do
@@ -346,7 +389,9 @@ RSpec.describe Dependabot::Gradle::UpdateChecker do
           with(
             dependency: dependency,
             dependency_files: dependency_files,
+            credentials: credentials,
             ignored_versions: [],
+            raise_on_ignored: false,
             target_version_details: {
               version: version_class.new("23.0"),
               source_url: "https://repo.maven.apache.org/maven2"
@@ -410,7 +455,9 @@ RSpec.describe Dependabot::Gradle::UpdateChecker do
           with(
             dependency: dependency,
             dependency_files: dependency_files,
+            credentials: credentials,
             ignored_versions: [],
+            raise_on_ignored: false,
             target_version_details: {
               version: version_class.new("23.0"),
               source_url: "https://jcenter.bintray.com"
@@ -469,7 +516,9 @@ RSpec.describe Dependabot::Gradle::UpdateChecker do
           with(
             dependency: dependency,
             dependency_files: dependency_files,
+            credentials: credentials,
             ignored_versions: [],
+            raise_on_ignored: false,
             target_version_details: {
               version: version_class.new("23.0"),
               source_url: "https://repo.maven.apache.org/maven2"

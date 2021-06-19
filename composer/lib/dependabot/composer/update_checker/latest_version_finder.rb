@@ -12,11 +12,13 @@ module Dependabot
     class UpdateChecker
       class LatestVersionFinder
         def initialize(dependency:, dependency_files:, credentials:,
-                       ignored_versions:, security_advisories:)
+                       ignored_versions:, raise_on_ignored: false,
+                       security_advisories:)
           @dependency          = dependency
           @dependency_files    = dependency_files
           @credentials         = credentials
           @ignored_versions    = ignored_versions
+          @raise_on_ignored    = raise_on_ignored
           @security_advisories = security_advisories
         end
 
@@ -43,8 +45,8 @@ module Dependabot
         def fetch_lowest_security_fix_version
           versions = available_versions
           versions = filter_prerelease_versions(versions)
-          versions = filter_ignored_versions(versions)
           versions = filter_vulnerable_versions(versions)
+          versions = filter_ignored_versions(versions)
           versions = filter_lower_versions(versions)
           versions.min
         end
@@ -56,8 +58,15 @@ module Dependabot
         end
 
         def filter_ignored_versions(versions_array)
-          versions_array.
-            reject { |v| ignore_reqs.any? { |r| r.satisfied_by?(v) } }
+          filtered =
+            versions_array.
+            reject { |v| ignore_requirements.any? { |r| r.satisfied_by?(v) } }
+
+          if @raise_on_ignored && filter_lower_versions(filtered).empty? && filter_lower_versions(versions_array).any?
+            raise AllVersionsIgnored
+          end
+
+          filtered
         end
 
         def filter_vulnerable_versions(versions_array)
@@ -66,15 +75,15 @@ module Dependabot
         end
 
         def filter_lower_versions(versions_array)
+          return versions_array unless dependency.version && version_class.correct?(dependency.version)
+
           versions_array.
             select { |version| version > version_class.new(dependency.version) }
         end
 
         def wants_prerelease?
           current_version = dependency.version
-          if current_version && version_class.new(current_version).prerelease?
-            return true
-          end
+          return true if current_version && version_class.new(current_version).prerelease?
 
           dependency.requirements.any? do |req|
             req[:requirement].match?(/\d-[A-Za-z]/)
@@ -142,7 +151,23 @@ module Dependabot
         end
 
         def registry_credentials
-          credentials.select { |cred| cred["type"] == "composer_repository" }
+          credentials.select { |cred| cred["type"] == "composer_repository" } +
+            auth_json_credentials
+        end
+
+        def auth_json_credentials
+          return [] unless auth_json
+
+          parsed_auth_json = JSON.parse(auth_json.content)
+          parsed_auth_json.fetch("http-basic", {}).map do |reg, details|
+            {
+              "registry" => reg,
+              "username" => details["username"],
+              "password" => details["password"]
+            }
+          end
+        rescue JSON::ParserError
+          raise Dependabot::DependencyFileNotParseable, auth_json.path
         end
 
         def composer_file
@@ -153,7 +178,11 @@ module Dependabot
           composer_file
         end
 
-        def ignore_reqs
+        def auth_json
+          dependency_files.find { |f| f.name == "auth.json" }
+        end
+
+        def ignore_requirements
           ignored_versions.map { |req| requirement_class.new(req.split(",")) }
         end
 

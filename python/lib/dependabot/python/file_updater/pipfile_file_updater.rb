@@ -2,15 +2,17 @@
 
 require "toml-rb"
 require "open3"
+require "dependabot/dependency"
 require "dependabot/python/requirement_parser"
+require "dependabot/python/file_parser/python_requirement_parser"
 require "dependabot/python/file_updater"
 require "dependabot/shared_helpers"
 require "dependabot/python/native_helpers"
+require "dependabot/python/name_normaliser"
 
 module Dependabot
   module Python
     class FileUpdater
-      # rubocop:disable Metrics/ClassLength
       class PipfileFileUpdater
         require_relative "pipfile_preparer"
         require_relative "pipfile_manifest_updater"
@@ -47,9 +49,7 @@ module Dependabot
           end
 
           if lockfile
-            if lockfile.content == updated_lockfile_content
-              raise "Expected Pipfile.lock to change!"
-            end
+            raise "Expected Pipfile.lock to change!" if lockfile.content == updated_lockfile_content
 
             updated_files <<
               updated_file(file: lockfile, content: updated_lockfile_content)
@@ -140,6 +140,7 @@ module Dependabot
             freeze_top_level_dependencies_except(dependencies)
         end
 
+        # rubocop:disable Metrics/PerceivedComplexity
         def freeze_dependencies_being_updated(pipfile_content)
           pipfile_object = TomlRB.parse(pipfile_content)
 
@@ -161,6 +162,7 @@ module Dependabot
 
           TomlRB.dump(pipfile_object)
         end
+        # rubocop:enable Metrics/PerceivedComplexity
 
         def subdep_type?(type)
           return false if dependency.top_level?
@@ -262,33 +264,6 @@ module Dependabot
         def run_pipenv_command(command, env: pipenv_env_variables)
           run_command("pyenv local #{python_version}")
           run_command(command, env: env)
-        rescue SharedHelpers::HelperSubprocessFailed => e
-          original_error ||= e
-          msg = e.message
-
-          relevant_error =
-            if error_suggests_bad_python_version?(msg) then original_error
-            else e
-            end
-
-          raise relevant_error unless error_suggests_bad_python_version?(msg)
-          raise relevant_error if python_version.start_with?("2")
-
-          # Clear the existing virtualenv, so that we use the new Python version
-          run_command("pyenv local #{python_version}")
-          run_command("pyenv exec pipenv --rm")
-
-          @python_version = "2.7.16"
-          retry
-        ensure
-          @python_version = nil
-          FileUtils.remove_entry(".python-version", true)
-        end
-
-        def error_suggests_bad_python_version?(message)
-          return true if message.include?("UnsupportedPythonVersion")
-
-          message.include?('Command "python setup.py egg_info" failed')
         end
 
         def write_temporary_dependency_files(pipfile_content)
@@ -325,9 +300,7 @@ module Dependabot
             nil
           end
 
-          if run_command("pyenv versions").include?("#{python_version}\n")
-            return
-          end
+          return if run_command("pyenv versions").include?("#{python_version}\n")
 
           requirements_path = NativeHelpers.python_requirements_path
           run_command("pyenv install -s #{python_version}")
@@ -336,9 +309,7 @@ module Dependabot
 
         def sanitized_setup_file_content(file)
           @sanitized_setup_file_content ||= {}
-          if @sanitized_setup_file_content[file.name]
-            return @sanitized_setup_file_content[file.name]
-          end
+          return @sanitized_setup_file_content[file.name] if @sanitized_setup_file_content[file.name]
 
           @sanitized_setup_file_content[file.name] =
             SetupFileSanitizer.
@@ -360,7 +331,8 @@ module Dependabot
             end
 
           # Ideally, the requirement is satisfied by a Python version we support
-          requirement = Python::Requirement.new(requirement_string)
+          requirement =
+            Python::Requirement.requirements_array(requirement_string).first
           version =
             PythonVersions::SUPPORTED_VERSIONS_TO_ITERATE.
             find { |v| requirement.satisfied_by?(Python::Version.new(v)) }
@@ -385,37 +357,14 @@ module Dependabot
         end
 
         def user_specified_python_requirement
-          if pipfile_python_requirement&.match?(/^\d/)
-            return pipfile_python_requirement
-          end
-
-          python_version_file_version || runtime_file_python_version
+          python_requirement_parser.user_specified_requirements.first
         end
 
-        def python_version_file_version
-          file_version = python_version_file&.content&.strip
-
-          return unless file_version
-          return unless pyenv_versions.include?("#{file_version}\n")
-
-          file_version
-        end
-
-        def runtime_file_python_version
-          return unless runtime_file
-
-          runtime_file.content.match(/(?<=python-).*/)&.to_s&.strip
-        end
-
-        def pyenv_versions
-          @pyenv_versions ||= run_command("pyenv install --list")
-        end
-
-        def pipfile_python_requirement
-          parsed_pipfile = TomlRB.parse(pipfile.content)
-
-          parsed_pipfile.dig("requires", "python_full_version") ||
-            parsed_pipfile.dig("requires", "python_version")
+        def python_requirement_parser
+          @python_requirement_parser ||=
+            FileParser::PythonRequirementParser.new(
+              dependency_files: dependency_files
+            )
         end
 
         def setup_cfg(file)
@@ -441,9 +390,8 @@ module Dependabot
           updated_file
         end
 
-        # See https://www.python.org/dev/peps/pep-0503/#normalized-names
         def normalise(name)
-          name.downcase.gsub(/[-_.]+/, "-")
+          NameNormaliser.normalise(name)
         end
 
         def parsed_lockfile
@@ -470,14 +418,6 @@ module Dependabot
           dependency_files.select { |f| f.name.end_with?(".txt") }
         end
 
-        def python_version_file
-          dependency_files.find { |f| f.name == ".python-version" }
-        end
-
-        def runtime_file
-          dependency_files.find { |f| f.name.end_with?("runtime.txt") }
-        end
-
         def pipenv_env_variables
           {
             "PIPENV_YES" => "true",       # Install new Python ver if needed
@@ -488,7 +428,6 @@ module Dependabot
           }
         end
       end
-      # rubocop:enable Metrics/ClassLength
     end
   end
 end

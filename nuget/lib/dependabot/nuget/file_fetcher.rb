@@ -26,16 +26,19 @@ module Dependabot
       def fetch_files
         fetched_files = []
         fetched_files += project_files
-        fetched_files += directory_build_props_files
+        fetched_files += directory_build_files
         fetched_files += imported_property_files
 
         fetched_files += packages_config_files
-        fetched_files << nuget_config if nuget_config
+        fetched_files += nuget_config_files
         fetched_files << global_json if global_json
+        fetched_files << packages_props if packages_props
 
         fetched_files = fetched_files.uniq
 
         if project_files.none? && packages_config_files.none?
+          raise @missing_sln_project_file_errors.first if @missing_sln_project_file_errors&.any?
+
           raise(
             Dependabot::DependencyFileNotFound,
             File.join(directory, "<anything>.(cs|vb|fs)proj")
@@ -77,6 +80,7 @@ module Dependabot
           end.compact
       end
 
+      # rubocop:disable Metrics/PerceivedComplexity
       def sln_file_names
         sln_files = repo_contents.select { |f| f.name.end_with?(".sln") }
         src_dir = repo_contents.any? { |f| f.name == "src" && f.type == "dir" }
@@ -93,33 +97,53 @@ module Dependabot
 
         sln_files.map(&:name)
       end
+      # rubocop:enable Metrics/PerceivedComplexity
 
-      def directory_build_props_files
-        return @directory_build_props_files if @directory_build_checked
+      def directory_build_files
+        return @directory_build_files if @directory_build_files_checked
 
-        @directory_build_checked = true
+        @directory_build_files_checked = true
         attempted_paths = []
-        @directory_build_props_files = []
+        @directory_build_files = []
 
         # Don't need to insert "." here, because Directory.Build.props files
         # can only be used by project files (not packages.config ones)
         project_files.map { |f| File.dirname(f.name) }.uniq.map do |dir|
-          possible_paths = dir.split("/").map.with_index do |_, i|
+          possible_paths = dir.split("/").flat_map.with_index do |_, i|
             base = dir.split("/").first(i + 1).join("/")
-            Pathname.new(base + "/Directory.Build.props").cleanpath.to_path
-          end.reverse + ["Directory.Build.props"]
+            possible_build_file_paths(base)
+          end.reverse
+
+          possible_paths += [
+            "Directory.Build.props",
+            "Directory.build.props",
+            "Directory.Packages.props",
+            "Directory.packages.props",
+            "Directory.Build.targets",
+            "Directory.build.targets"
+          ]
 
           possible_paths.each do |path|
             break if attempted_paths.include?(path)
 
             attempted_paths << path
-            @directory_build_props_files << fetch_file_from_host(path)
-          rescue Dependabot::DependencyFileNotFound
-            next
+            file = fetch_file_if_present(path)
+            @directory_build_files << file if file
           end
         end
 
-        @directory_build_props_files
+        @directory_build_files
+      end
+
+      def possible_build_file_paths(base)
+        [
+          Pathname.new(base + "/Directory.Build.props").cleanpath.to_path,
+          Pathname.new(base + "/Directory.build.props").cleanpath.to_path,
+          Pathname.new(base + "/Directory.Packages.props").cleanpath.to_path,
+          Pathname.new(base + "/Directory.packages.props").cleanpath.to_path,
+          Pathname.new(base + "/Directory.Build.targets").cleanpath.to_path,
+          Pathname.new(base + "/Directory.build.targets").cleanpath.to_path
+        ]
       end
 
       def sln_project_files
@@ -135,7 +159,9 @@ module Dependabot
 
             paths.map do |path|
               fetch_file_from_host(path)
-            rescue Dependabot::DependencyFileNotFound
+            rescue Dependabot::DependencyFileNotFound => e
+              @missing_sln_project_file_errors ||= []
+              @missing_sln_project_file_errors << e
               # Don't worry about missing files too much for now (at least
               # until we start resolving properties)
               nil
@@ -146,9 +172,10 @@ module Dependabot
       def sln_files
         return unless sln_file_names
 
-        @sln_files ||= sln_file_names.map do |sln_file_name|
-          fetch_file_from_host(sln_file_name)
-        end
+        @sln_files ||=
+          sln_file_names.
+          map { |sln_file_name| fetch_file_from_host(sln_file_name) }.
+          select { |file| file.content.valid_encoding? }
       end
 
       def csproj_file
@@ -175,24 +202,35 @@ module Dependabot
           end
       end
 
-      def nuget_config
-        @nuget_config ||=
-          begin
-            file = repo_contents.
+      def nuget_config_files
+        return @nuget_config_files if @nuget_config_files
+
+        candidate_paths =
+          [*project_files.map { |f| File.dirname(f.name) }, "."].uniq
+
+        @nuget_config_files ||=
+          candidate_paths.map do |dir|
+            file = repo_contents(dir: dir).
                    find { |f| f.name.casecmp("nuget.config").zero? }
-            file = fetch_file_from_host(file.name) if file
+            file = fetch_file_from_host(File.join(dir, file.name)) if file
             file&.tap { |f| f.support_file = true }
-          end
+          end.compact
       end
 
       def global_json
         @global_json ||= fetch_file_if_present("global.json")
       end
 
+      def packages_props
+        @packages_props ||= fetch_file_if_present("Packages.props")
+      end
+
       def imported_property_files
         imported_property_files = []
 
-        [*project_files, *directory_build_props_files].each do |proj_file|
+        files = [*project_files, *directory_build_files]
+
+        files.each do |proj_file|
           previously_fetched_files = project_files + imported_property_files
           imported_property_files +=
             fetch_imported_property_files(

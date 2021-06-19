@@ -3,9 +3,11 @@
 require "excon"
 require "toml-rb"
 require "open3"
+require "dependabot/dependency"
 require "dependabot/errors"
 require "dependabot/shared_helpers"
 require "dependabot/python/file_parser"
+require "dependabot/python/file_parser/python_requirement_parser"
 require "dependabot/python/file_updater/pyproject_preparer"
 require "dependabot/python/update_checker"
 require "dependabot/python/version"
@@ -13,19 +15,25 @@ require "dependabot/python/requirement"
 require "dependabot/python/native_helpers"
 require "dependabot/python/python_versions"
 require "dependabot/python/authed_url_builder"
+require "dependabot/python/name_normaliser"
 
-# rubocop:disable Metrics/ClassLength
 module Dependabot
   module Python
     class UpdateChecker
       # This class does version resolution for pyproject.toml files.
       class PoetryVersionResolver
-        GIT_REFERENCE_NOT_FOUND_REGEX =
-          /'git'.*pypoetry-git-(?<name>.+?).{8}','checkout','(?<tag>.+?)'/.
-          freeze
-        GIT_DEPENDENCY_UNREACHABLE_REGEX =
-          /Command '\['git', 'clone', '(?<url>.+?)'.* exit status 128/.
-          freeze
+        GIT_REFERENCE_NOT_FOUND_REGEX = /
+          'git'.*pypoetry-git-(?<name>.+?).{8}',
+          'checkout',
+          '(?<tag>.+?)'
+        /x.freeze
+        GIT_DEPENDENCY_UNREACHABLE_REGEX = /
+            '\['git',
+            \s+'clone',
+            \s+'--recurse-submodules',
+            \s+'(?<url>.+?)'.*
+            \s+exit\s+status\s+128
+          /mx.freeze
 
         attr_reader :dependency, :dependency_files, :credentials
 
@@ -46,11 +54,11 @@ module Dependabot
           @resolvable ||= {}
           return @resolvable[version] if @resolvable.key?(version)
 
-          if fetch_latest_resolvable_version_string(requirement: "==#{version}")
-            @resolvable[version] = true
-          else
-            @resolvable[version] = false
-          end
+          @resolvable[version] = if fetch_latest_resolvable_version_string(requirement: "==#{version}")
+                                   true
+                                 else
+                                   false
+                                 end
         rescue SharedHelpers::HelperSubprocessFailed => e
           raise unless e.message.include?("SolverProblemError")
 
@@ -59,12 +67,9 @@ module Dependabot
 
         private
 
-        # rubocop:disable Metrics/MethodLength
         def fetch_latest_resolvable_version_string(requirement:)
           @latest_resolvable_version_string ||= {}
-          if @latest_resolvable_version_string.key?(requirement)
-            return @latest_resolvable_version_string[requirement]
-          end
+          return @latest_resolvable_version_string[requirement] if @latest_resolvable_version_string.key?(requirement)
 
           @latest_resolvable_version_string[requirement] ||=
             SharedHelpers.in_a_temporary_directory do
@@ -94,7 +99,6 @@ module Dependabot
               end
             end
         end
-        # rubocop:enable Metrics/MethodLength
 
         def fetch_version_from_parsed_lockfile(updated_lockfile)
           version =
@@ -130,8 +134,8 @@ module Dependabot
           # would break Python version compatibility the update is blocked
           return if error.message.include?("support the following Python")
 
-          # If any kind of other error is now occuring as a result of our change
-          # then we want to hear about it
+          # If any kind of other error is now occurring as a result of our
+          # change then we want to hear about it
           raise
         end
 
@@ -189,49 +193,29 @@ module Dependabot
         end
 
         def python_version
-          pyproject_object = TomlRB.parse(pyproject.content)
-          poetry_object = pyproject_object.dig("tool", "poetry")
-
-          requirement =
-            poetry_object&.dig("dependencies", "python") ||
-            poetry_object&.dig("dev-dependencies", "python")
-
-          unless requirement
-            return python_version_file_version || runtime_file_python_version
-          end
-
-          requirements =
-            Python::Requirement.requirements_array(requirement)
+          requirements = python_requirement_parser.user_specified_requirements
+          requirements = requirements.
+                         map { |r| Python::Requirement.requirements_array(r) }
 
           version = PythonVersions::SUPPORTED_VERSIONS_TO_ITERATE.find do |v|
-            requirements.any? { |r| r.satisfied_by?(Python::Version.new(v)) }
+            requirements.all? do |reqs|
+              reqs.any? { |r| r.satisfied_by?(Python::Version.new(v)) }
+            end
           end
           return version if version
 
-          msg = "Dependabot detected the following Python requirement "\
-                "for your project: '#{requirement}'.\n\nCurrently, the "\
+          msg = "Dependabot detected the following Python requirements "\
+                "for your project: '#{requirements}'.\n\nCurrently, the "\
                 "following Python versions are supported in Dependabot: "\
                 "#{PythonVersions::SUPPORTED_VERSIONS.join(', ')}."
           raise DependencyFileNotResolvable, msg
         end
 
-        def python_version_file_version
-          file_version = python_version_file&.content&.strip
-
-          return unless file_version
-          return unless pyenv_versions.include?("#{file_version}\n")
-
-          file_version
-        end
-
-        def runtime_file_python_version
-          return unless runtime_file
-
-          runtime_file.content.match(/(?<=python-).*/)&.to_s&.strip
-        end
-
-        def pyenv_versions
-          @pyenv_versions ||= run_poetry_command("pyenv install --list")
+        def python_requirement_parser
+          @python_requirement_parser ||=
+            FileParser::PythonRequirementParser.new(
+              dependency_files: dependency_files
+            )
         end
 
         def pre_installed_python?(version)
@@ -272,6 +256,7 @@ module Dependabot
             freeze_top_level_dependencies_except([dependency])
         end
 
+        # rubocop:disable Metrics/PerceivedComplexity
         def set_target_dependency_req(pyproject_content, updated_requirement)
           return pyproject_content unless updated_requirement
 
@@ -298,6 +283,7 @@ module Dependabot
 
           TomlRB.dump(pyproject_object)
         end
+        # rubocop:enable Metrics/PerceivedComplexity
 
         def subdep_type
           category =
@@ -324,14 +310,6 @@ module Dependabot
           poetry_lock || pyproject_lock
         end
 
-        def python_version_file
-          dependency_files.find { |f| f.name == ".python-version" }
-        end
-
-        def runtime_file
-          dependency_files.find { |f| f.name.end_with?("runtime.txt") }
-        end
-
         def run_poetry_command(command)
           start = Time.now
           command = SharedHelpers.escape_command(command)
@@ -352,12 +330,10 @@ module Dependabot
           )
         end
 
-        # See https://www.python.org/dev/peps/pep-0503/#normalized-names
         def normalise(name)
-          name.downcase.gsub(/[-_.]+/, "-")
+          NameNormaliser.normalise(name)
         end
       end
     end
   end
 end
-# rubocop:enable Metrics/ClassLength

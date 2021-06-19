@@ -2,9 +2,11 @@
 
 require "toml-rb"
 
+require "dependabot/dependency"
 require "dependabot/python/file_parser"
 require "dependabot/python/file_updater"
 require "dependabot/python/authed_url_builder"
+require "dependabot/python/name_normaliser"
 require "securerandom"
 
 module Dependabot
@@ -34,6 +36,7 @@ module Dependabot
         end
 
         # rubocop:disable Metrics/PerceivedComplexity
+        # rubocop:disable Metrics/AbcSize
         def freeze_top_level_dependencies_except(dependencies)
           return pyproject_content unless lockfile
 
@@ -51,12 +54,14 @@ module Dependabot
 
               next unless (locked_version = locked_details&.fetch("version"))
 
+              next if locked_details&.dig("source", "type") == "directory"
+
               if locked_details&.dig("source", "type") == "git"
                 poetry_object[key][dep_name] = {
                   "git" => locked_details&.dig("source", "url"),
                   "rev" => locked_details&.dig("source", "reference")
                 }
-              elsif poetry_object[dep_name].is_a?(Hash)
+              elsif poetry_object[key][dep_name].is_a?(Hash)
                 poetry_object[key][dep_name]["version"] = locked_version
               else
                 poetry_object[key][dep_name] = locked_version
@@ -66,6 +71,7 @@ module Dependabot
 
           TomlRB.dump(pyproject_object)
         end
+        # rubocop:enable Metrics/AbcSize
         # rubocop:enable Metrics/PerceivedComplexity
 
         private
@@ -77,9 +83,8 @@ module Dependabot
             find { |d| d["name"] == normalise(dep_name) }
         end
 
-        # See https://www.python.org/dev/peps/pep-0503/#normalized-names
         def normalise(name)
-          name.downcase.gsub(/[-_.]+/, "-")
+          NameNormaliser.normalise(name)
         end
 
         def pyproject_sources

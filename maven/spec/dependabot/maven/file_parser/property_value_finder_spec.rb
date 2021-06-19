@@ -41,7 +41,7 @@ RSpec.describe Dependabot::Maven::FileParser::PropertyValueFinder do
         its([:value]) { is_expected.to eq("4.3.12.RELEASE") }
       end
 
-      context "when the property containts a tricky to split string" do
+      context "when the property contains a tricky to split string" do
         let(:property_name) { "accumulo.1.6.version" }
         specify { expect { property_details }.to_not raise_error }
       end
@@ -70,6 +70,11 @@ RSpec.describe Dependabot::Maven::FileParser::PropertyValueFinder do
       context "and the property name needs careful manipulation" do
         let(:property_name) { "spring.version.2.2" }
         its([:value]) { is_expected.to eq("2.2.1") }
+
+        context "(case2)" do
+          let(:property_name) { "jta-api-1.2-version" }
+          its([:value]) { is_expected.to eq("1.2.1") }
+        end
       end
     end
 
@@ -145,6 +150,18 @@ RSpec.describe Dependabot::Maven::FileParser::PropertyValueFinder do
         end
 
         its([:value]) { is_expected.to eq("2.7") }
+      end
+    end
+
+    context "with a pom that contains invalid xml" do
+      let(:dependency_files) { project_dependency_files("invalid_version_ref") }
+      let(:property_name) { "guava.version`" }
+      let(:callsite_pom) { dependency_files.find { |f| f.name == "pom.xml" } }
+
+      it "raises a helpful error" do
+        expect { subject }.to raise_error(Dependabot::DependencyFileNotEvaluatable) do |error|
+          expect(error.message).to eq("ERROR: Invalid expression: /project/guava.version`")
+        end
       end
     end
   end

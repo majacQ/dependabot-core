@@ -6,16 +6,18 @@ require "dependabot/file_parsers/base/dependency_set"
 require "dependabot/shared_helpers"
 require "dependabot/python/file_parser"
 require "dependabot/python/native_helpers"
+require "dependabot/python/name_normaliser"
 
 module Dependabot
   module Python
     class FileParser
       class SetupFileParser
-        INSTALL_REQUIRES_REGEX =
-          /install_requires\s*=\s*(\[.*?\])[,)\s]/m.freeze
-        SETUP_REQUIRES_REGEX = /setup_requires\s*=\s*(\[.*?\])[,)\s]/m.freeze
-        TESTS_REQUIRE_REGEX = /tests_require\s*=\s*(\[.*?\])[,)\s]/m.freeze
-        EXTRAS_REQUIRE_REGEX = /extras_require\s*=\s*(\{.*?\})[,)\s]/m.freeze
+        INSTALL_REQUIRES_REGEX = /install_requires\s*=\s*\[/m.freeze
+        SETUP_REQUIRES_REGEX = /setup_requires\s*=\s*\[/m.freeze
+        TESTS_REQUIRE_REGEX = /tests_require\s*=\s*\[/m.freeze
+        EXTRAS_REQUIRE_REGEX = /extras_require\s*=\s*\{/m.freeze
+
+        CLOSING_BRACKET = { "[" => "]", "{" => "}" }.freeze
 
         def initialize(dependency_files:)
           @dependency_files = dependency_files
@@ -35,7 +37,7 @@ module Dependabot
 
             dependencies <<
               Dependency.new(
-                name: normalised_name(dep["name"]),
+                name: normalised_name(dep["name"], dep["extras"]),
                 version: dep["version"]&.include?("*") ? nil : dep["version"],
                 requirements: [{
                   requirement: dep["requirement"],
@@ -67,9 +69,9 @@ module Dependabot
             requirements
           end
         rescue SharedHelpers::HelperSubprocessFailed => e
-          if e.message.start_with?("InstallationError")
-            raise Dependabot::DependencyFileNotEvaluatable, e.message
-          end
+          raise Dependabot::DependencyFileNotEvaluatable, e.message if e.message.start_with?("InstallationError")
+
+          return [] unless setup_file
 
           parsed_sanitized_setup_file
         end
@@ -121,16 +123,10 @@ module Dependabot
         # entries are dynamic), but it is an alternative approach to the one
         # used in parser.py which sometimes succeeds when that has failed.
         def write_sanitized_setup_file
-          original_content = setup_file.content
-
-          install_requires =
-            original_content.match(INSTALL_REQUIRES_REGEX)&.captures&.first
-          setup_requires =
-            original_content.match(SETUP_REQUIRES_REGEX)&.captures&.first
-          tests_require =
-            original_content.match(TESTS_REQUIRE_REGEX)&.captures&.first
-          extras_require =
-            original_content.match(EXTRAS_REQUIRE_REGEX)&.captures&.first
+          install_requires = get_regexed_req_array(INSTALL_REQUIRES_REGEX)
+          setup_requires = get_regexed_req_array(SETUP_REQUIRES_REGEX)
+          tests_require = get_regexed_req_array(TESTS_REQUIRE_REGEX)
+          extras_require = get_regexed_req_dict(EXTRAS_REQUIRE_REGEX)
 
           tmp = "from setuptools import setup\n\n"\
                 "setup(name=\"sanitized-package\",version=\"0.0.1\","
@@ -144,9 +140,32 @@ module Dependabot
           File.write("setup.py", tmp)
         end
 
-        # See https://www.python.org/dev/peps/pep-0503/#normalized-names
-        def normalised_name(name)
-          name.downcase.gsub(/[-_.]+/, "-")
+        def get_regexed_req_array(regex)
+          return unless (mch = setup_file.content.match(regex))
+
+          "[#{mch.post_match[0..closing_bracket_index(mch.post_match, '[')]}"
+        end
+
+        def get_regexed_req_dict(regex)
+          return unless (mch = setup_file.content.match(regex))
+
+          "{#{mch.post_match[0..closing_bracket_index(mch.post_match, '{')]}"
+        end
+
+        def closing_bracket_index(string, bracket)
+          closes_required = 1
+
+          string.chars.each_with_index do |char, index|
+            closes_required += 1 if char == bracket
+            closes_required -= 1 if char == CLOSING_BRACKET.fetch(bracket)
+            return index if closes_required.zero?
+          end
+
+          0
+        end
+
+        def normalised_name(name, extras)
+          NameNormaliser.normalise_including_extras(name, extras)
         end
 
         def setup_file

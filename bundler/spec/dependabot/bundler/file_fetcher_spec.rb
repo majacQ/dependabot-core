@@ -446,6 +446,32 @@ RSpec.describe Dependabot::Bundler::FileFetcher do
             "bump-core"
           )
       end
+
+      context "but has a .specification file" do
+        before do
+          stub_request(:get, url + "plugins/bump-core?ref=sha").
+            with(headers: { "Authorization" => "token token" }).
+            to_return(
+              status: 200,
+              body: fixture("github", "contents_ruby_with_specification.json"),
+              headers: { "content-type" => "application/json" }
+            )
+          stub_request(
+            :get, url + "plugins/bump-core/.specification?ref=sha"
+          ).with(headers: { "Authorization" => "token token" }).
+            to_return(
+              status: 200,
+              body: fixture("github", "ruby_version_content.json"),
+              headers: { "content-type" => "application/json" }
+            )
+        end
+
+        it "fetches the .specification from path dependency" do
+          expect(file_fetcher_instance.files.count).to eq(3)
+          expect(file_fetcher_instance.files.map(&:name)).
+            to include("plugins/bump-core/.specification")
+        end
+      end
     end
 
     context "that has an unfetchable directory path" do
@@ -484,6 +510,22 @@ RSpec.describe Dependabot::Bundler::FileFetcher do
           expect(error).to be_a(Dependabot::DependencyFileNotParseable)
           expect(error.file_path).to eq("/Gemfile.lock")
         end
+      end
+    end
+
+    context "that has a lockfile with an unknown plugin source" do
+      before do
+        stub_request(:get, url + "Gemfile.lock?ref=sha").
+          with(headers: { "Authorization" => "token token" }).
+          to_return(
+            status: 200,
+            body: fixture("github", "gemfile_lock_with_unknown_source.json"),
+            headers: { "content-type" => "application/json" }
+          )
+      end
+
+      it "quietly ignores the error" do
+        expect(file_fetcher_instance.files.count).to eq(2)
       end
     end
   end

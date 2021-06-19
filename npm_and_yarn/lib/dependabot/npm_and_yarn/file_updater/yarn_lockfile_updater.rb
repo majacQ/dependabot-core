@@ -23,9 +23,7 @@ module Dependabot
 
         def updated_yarn_lock_content(yarn_lock)
           @updated_yarn_lock_content ||= {}
-          if @updated_yarn_lock_content[yarn_lock.name]
-            return @updated_yarn_lock_content[yarn_lock.name]
-          end
+          return @updated_yarn_lock_content[yarn_lock.name] if @updated_yarn_lock_content[yarn_lock.name]
 
           new_content = updated_yarn_lock(yarn_lock)
 
@@ -99,7 +97,6 @@ module Dependabot
           )
         end
 
-        # rubocop:disable Metrics/CyclomaticComplexity
         # rubocop:disable Metrics/PerceivedComplexity
         def run_yarn_updater(path:, lockfile_name:,
                              top_level_dependency_updates:)
@@ -131,7 +128,7 @@ module Dependabot
 
           sleep(rand(3.0..10.0)) && retry
         end
-        # rubocop:enable Metrics/CyclomaticComplexity
+
         # rubocop:enable Metrics/PerceivedComplexity
 
         def run_yarn_top_level_updater(top_level_dependency_updates:)
@@ -164,7 +161,6 @@ module Dependabot
         end
 
         # rubocop:disable Metrics/AbcSize
-        # rubocop:disable Metrics/CyclomaticComplexity
         # rubocop:disable Metrics/PerceivedComplexity
         # rubocop:disable Metrics/MethodLength
         def handle_yarn_lock_updater_error(error, yarn_lock)
@@ -173,7 +169,7 @@ module Dependabot
           # Local path error: When installing a git dependency which
           # is using local file paths for sub-dependencies (e.g. unbuilt yarn
           # workspace project)
-          sub_dep_local_path_err = "Package \"\" refers to a non-existing file"
+          sub_dep_local_path_err = 'Package "" refers to a non-existing file'
           if error_message.match?(INVALID_PACKAGE) ||
              error_message.start_with?(sub_dep_local_path_err)
             raise_resolvability_error(error_message, yarn_lock)
@@ -237,16 +233,12 @@ module Dependabot
             raise Dependabot::GitDependenciesNotReachable, dependency_url
           end
 
-          if error_message.match?(TIMEOUT_FETCHING_PACKAGE)
-            handle_timeout(error_message, yarn_lock)
-          end
+          handle_timeout(error_message, yarn_lock) if error_message.match?(TIMEOUT_FETCHING_PACKAGE)
 
           if error_message.start_with?("Couldn't find any versions") ||
              error_message.include?(": Not found")
 
-            unless resolvable_before_update?(yarn_lock)
-              raise_resolvability_error(error_message, yarn_lock)
-            end
+            raise_resolvability_error(error_message, yarn_lock) unless resolvable_before_update?(yarn_lock)
 
             # Dependabot has probably messed something up with the update and we
             # want to hear about it
@@ -256,15 +248,12 @@ module Dependabot
           raise error
         end
         # rubocop:enable Metrics/AbcSize
-        # rubocop:enable Metrics/CyclomaticComplexity
         # rubocop:enable Metrics/PerceivedComplexity
         # rubocop:enable Metrics/MethodLength
 
         def resolvable_before_update?(yarn_lock)
           @resolvable_before_update ||= {}
-          if @resolvable_before_update.key?(yarn_lock.name)
-            return @resolvable_before_update[yarn_lock.name]
-          end
+          return @resolvable_before_update[yarn_lock.name] if @resolvable_before_update.key?(yarn_lock.name)
 
           @resolvable_before_update[yarn_lock.name] =
             begin
@@ -295,6 +284,7 @@ module Dependabot
           write_lockfiles
 
           File.write(".npmrc", npmrc_content)
+          File.write(".yarnrc", yarnrc_content) if yarnrc_specifies_npm_reg?
 
           package_files.each do |file|
             path = file.name
@@ -388,9 +378,13 @@ module Dependabot
             updated_content = updated_content.gsub(new_req, req)
           end
 
-          if remove_integrity_lines?
-            updated_content = remove_integrity_lines(updated_content)
-          end
+          # Enforce https for most common hostnames
+          updated_content = updated_content.gsub(
+            %r{http://(.*?(?:yarnpkg\.com|npmjs\.org|npmjs\.com))/},
+            'https://\1/'
+          )
+
+          updated_content = remove_integrity_lines(updated_content) if remove_integrity_lines?
 
           updated_content
         end
@@ -422,23 +416,13 @@ module Dependabot
           reg = NpmAndYarn::UpdateChecker::RegistryFinder.new(
             dependency: missing_dep,
             credentials: credentials,
-            npmrc_file: dependency_files.
-                        find { |f| f.name.end_with?(".npmrc") },
-            yarnrc_file: dependency_files.
-                         find { |f| f.name.end_with?(".yarnrc") }
+            npmrc_file: npmrc_file,
+            yarnrc_file: yarnrc_file
           ).registry
 
-          # Sanitize Gemfury URLs
-          reg = reg.gsub(%r{(?<=\.fury\.io)/.*}, "")
-          return if central_registry?(reg) && !package_name.start_with?("@")
+          return if UpdateChecker::RegistryFinder.central_registry?(reg) && !package_name.start_with?("@")
 
           raise PrivateSourceAuthenticationFailure, reg
-        end
-
-        def central_registry?(registry)
-          NpmAndYarn::FileParser::CENTRAL_REGISTRIES.any? do |r|
-            r.include?(registry)
-          end
         end
 
         def raise_resolvability_error(error_message, yarn_lock)
@@ -484,10 +468,30 @@ module Dependabot
           npmrc_content.match?(/^package-lock\s*=\s*false/)
         end
 
+        def yarnrc_specifies_npm_reg?
+          return false unless yarnrc_file
+
+          regex = UpdateChecker::RegistryFinder::YARN_GLOBAL_REGISTRY_REGEX
+          yarnrc_global_registry =
+            yarnrc_file.content.
+            lines.find { |line| line.match?(regex) }&.
+            match(regex)&.
+            named_captures&.
+            fetch("registry")
+
+          return false unless yarnrc_global_registry
+
+          yarnrc_global_registry.include?("registry.npmjs.org")
+        end
+
+        def yarnrc_content
+          'registry "https://registry.npmjs.org"'
+        end
+
         def sanitized_package_json_content(content)
           updated_content =
             content.
-            gsub(/\{\{.*?\}\}/, "something"). # {{ name }} syntax not allowed
+            gsub(/\{\{[^\}]*?\}\}/, "something"). # {{ nm }} syntax not allowed
             gsub(/(?<!\\)\\ /, " ").          # escaped whitespace not allowed
             gsub(%r{^\s*//.*}, " ")           # comments are not allowed
 
@@ -508,6 +512,14 @@ module Dependabot
 
         def package_files
           dependency_files.select { |f| f.name.end_with?("package.json") }
+        end
+
+        def yarnrc_file
+          dependency_files.find { |f| f.name == ".yarnrc" }
+        end
+
+        def npmrc_file
+          dependency_files.find { |f| f.name == ".npmrc" }
         end
       end
     end

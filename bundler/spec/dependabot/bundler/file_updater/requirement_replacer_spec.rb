@@ -40,15 +40,20 @@ RSpec.describe Dependabot::Bundler::FileUpdater::RequirementReplacer do
   describe "#rewrite" do
     subject(:rewrite) { replacer.rewrite(content) }
 
-    let(:content) { fixture("ruby", "gemfiles", "git_source") }
-
     context "with a Gemfile" do
       let(:file_type) { :gemfile }
 
       context "when the declaration spans multiple lines" do
-        let(:content) { fixture("ruby", "gemfiles", "git_source") }
+        let(:content) do
+          bundler_project_dependency_file("git_source", filename: "Gemfile").content
+        end
         it { is_expected.to include(%(gem "business", "~> 1.5.0",\n    git: )) }
         it { is_expected.to include(%(gem "statesman", "~> 1.2.0")) }
+      end
+
+      context "when the declaration uses a symbol" do
+        let(:content) { %(gem "business", :"~> 1.0", require: true) }
+        it { is_expected.to include(%(gem "business", :"~> 1.5.0", require:)) }
       end
 
       context "when the declaration changes from one to many requirements" do
@@ -141,6 +146,13 @@ RSpec.describe Dependabot::Bundler::FileUpdater::RequirementReplacer do
       context "with a function requirement" do
         let(:content) { %(version = "1.0.0"\ngem "business", version) }
         it { is_expected.to eq(content) }
+
+        context "in an || condition" do
+          let(:content) do
+            %(version = "1.0.0"\ngem "business", ENV["a"] || version)
+          end
+          it { is_expected.to eq(content) }
+        end
       end
 
       context "with no requirement" do
@@ -202,7 +214,9 @@ RSpec.describe Dependabot::Bundler::FileUpdater::RequirementReplacer do
 
     context "with a gemspec" do
       let(:file_type) { :gemspec }
-      let(:content) { fixture("ruby", "gemspecs", "example") }
+      let(:content) do
+        bundler_project_dependency_file("gemfile_example", filename: "example.gemspec").content
+      end
 
       context "when declared with `add_runtime_dependency`" do
         let(:dependency_name) { "bundler" }
@@ -227,7 +241,9 @@ RSpec.describe Dependabot::Bundler::FileUpdater::RequirementReplacer do
       end
 
       context "with an exact requirement" do
-        let(:content) { fixture("ruby", "gemspecs", "exact") }
+        let(:content) do
+          bundler_project_dependency_file("gemfile_exact", filename: "example.gemspec").content
+        end
 
         context "when declared with `=` operator" do
           let(:dependency_name) { "statesman" }
@@ -242,6 +258,16 @@ RSpec.describe Dependabot::Bundler::FileUpdater::RequirementReplacer do
           let(:previous_requirement) { "= 1.0.0" }
           it { is_expected.to include(%(d_dependency 'business', '1.5.0')) }
         end
+      end
+
+      context "with inequality matchers" do
+        let(:previous_requirement) { ">= 2.0.0, != 2.0.3, != 2.0.4" }
+        let(:updated_requirement) { "~> 2.0.1, != 2.0.3, != 2.0.4" }
+        let(:content) do
+          %(s.add_runtime_dependency("business", "~> 2.0.1", "!= 2.0.3", "!= 2.0.4"))
+        end
+
+        it { is_expected.to eq(content) }
       end
 
       context "when declared with `add_development_dependency`" do

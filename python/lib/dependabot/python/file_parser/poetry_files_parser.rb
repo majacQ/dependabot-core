@@ -7,6 +7,7 @@ require "dependabot/file_parsers/base/dependency_set"
 require "dependabot/python/file_parser"
 require "dependabot/python/requirement"
 require "dependabot/errors"
+require "dependabot/python/name_normaliser"
 
 module Dependabot
   module Python
@@ -75,7 +76,10 @@ module Dependabot
                 name: normalise(details.fetch("name")),
                 version: details.fetch("version"),
                 requirements: [],
-                package_manager: "pip"
+                package_manager: "pip",
+                subdependency_metadata: [{
+                  production: details["category"] != "dev"
+                }]
               )
           end
 
@@ -87,7 +91,7 @@ module Dependabot
 
           parsed_lockfile.fetch("package", []).
             find { |p| normalise(p.fetch("name")) == normalise(dep_name) }&.
-            fetch("verison", nil)
+            fetch("version", nil)
         end
 
         def check_requirements(req)
@@ -97,9 +101,8 @@ module Dependabot
           raise Dependabot::DependencyFileNotEvaluatable, e.message
         end
 
-        # See https://www.python.org/dev/peps/pep-0503/#normalized-names
         def normalise(name)
-          name.downcase.gsub(/[-_.]+/, "-")
+          NameNormaliser.normalise(name)
         end
 
         def parsed_pyproject

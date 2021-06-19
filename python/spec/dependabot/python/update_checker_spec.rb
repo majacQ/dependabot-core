@@ -12,14 +12,15 @@ RSpec.describe Dependabot::Python::UpdateChecker do
   before do
     stub_request(:get, pypi_url).to_return(status: 200, body: pypi_response)
   end
-  let(:pypi_url) { "https://pypi.python.org/simple/luigi/" }
-  let(:pypi_response) { fixture("pypi_simple_response.html") }
+  let(:pypi_url) { "https://pypi.org/simple/luigi/" }
+  let(:pypi_response) { fixture("pypi", "pypi_simple_response.html") }
   let(:checker) do
     described_class.new(
       dependency: dependency,
       dependency_files: dependency_files,
       credentials: credentials,
       ignored_versions: ignored_versions,
+      raise_on_ignored: raise_on_ignored,
       security_advisories: security_advisories
     )
   end
@@ -32,6 +33,7 @@ RSpec.describe Dependabot::Python::UpdateChecker do
     }]
   end
   let(:ignored_versions) { [] }
+  let(:raise_on_ignored) { false }
   let(:security_advisories) { [] }
   let(:dependency_files) { [requirements_file] }
   let(:pipfile) do
@@ -106,22 +108,78 @@ RSpec.describe Dependabot::Python::UpdateChecker do
           dependency_files: dependency_files,
           credentials: credentials,
           ignored_versions: ignored_versions,
+          raise_on_ignored: raise_on_ignored,
           security_advisories: security_advisories
         ).and_call_original
       expect(checker.latest_version).to eq(Gem::Version.new("2.6.0"))
     end
   end
 
+  describe "#lowest_security_fix_version" do
+    subject { checker.lowest_security_fix_version }
+
+    it "finds the lowest available non-vulnerable version" do
+      is_expected.to eq(Gem::Version.new("2.0.1"))
+    end
+
+    context "with a security vulnerability" do
+      let(:dependency_version) { "2.0.0" }
+      let(:security_advisories) do
+        [
+          Dependabot::SecurityAdvisory.new(
+            dependency_name: dependency_name,
+            package_manager: "pip",
+            vulnerable_versions: ["<= 2.1.0"]
+          )
+        ]
+      end
+
+      it { is_expected.to eq(Gem::Version.new("2.1.1")) }
+    end
+  end
+
   describe "#latest_resolvable_version" do
     subject { checker.latest_resolvable_version }
 
-    context "without a Pipfile or pip-compile file" do
+    context "with a requirements file only" do
       let(:dependency_files) { [requirements_file] }
       it { is_expected.to eq(Gem::Version.new("2.6.0")) }
 
       context "when the user is ignoring the latest version" do
         let(:ignored_versions) { [">= 2.0.0.a, < 3.0"] }
         it { is_expected.to eq(Gem::Version.new("1.3.0")) }
+      end
+
+      context "and a .python-version file" do
+        let(:dependency_files) { [requirements_file, python_version_file] }
+        let(:python_version_file) do
+          Dependabot::DependencyFile.new(
+            name: ".python-version",
+            content: python_version_content
+          )
+        end
+        let(:python_version_content) { "3.7.0\n" }
+        let(:pypi_response) do
+          fixture("pypi", "pypi_simple_response_django.html")
+        end
+        let(:pypi_url) { "https://pypi.org/simple/django/" }
+        let(:dependency_name) { "django" }
+        let(:dependency_version) { "2.2.0" }
+        let(:dependency_requirements) do
+          [{
+            file: "requirements.txt",
+            requirement: "==2.2.0",
+            groups: [],
+            source: nil
+          }]
+        end
+
+        it { is_expected.to eq(Gem::Version.new("3.2.4")) }
+
+        context "that disallows the latest version" do
+          let(:python_version_content) { "3.5.3\n" }
+          it { is_expected.to eq(Gem::Version.new("2.2.24")) }
+        end
       end
     end
 
@@ -169,8 +227,10 @@ RSpec.describe Dependabot::Python::UpdateChecker do
         let(:manifest_fixture_name) { "requests.in" }
         let(:generated_fixture_name) { "pip_compile_requests.txt" }
         let(:requirements_fixture_name) { "urllib.txt" }
-        let(:pypi_url) { "https://pypi.python.org/simple/urllib3/" }
-        let(:pypi_response) { fixture("pypi_simple_response_urllib3.html") }
+        let(:pypi_url) { "https://pypi.org/simple/urllib3/" }
+        let(:pypi_response) do
+          fixture("pypi", "pypi_simple_response_urllib3.html")
+        end
 
         let(:dependency_name) { "urllib3" }
         let(:dependency_version) { "1.22" }
@@ -292,8 +352,10 @@ RSpec.describe Dependabot::Python::UpdateChecker do
             source: nil
           }]
         end
-        let(:pypi_url) { "https://pypi.python.org/simple/attrs/" }
-        let(:pypi_response) { fixture("pypi_simple_response_attrs.html") }
+        let(:pypi_url) { "https://pypi.org/simple/attrs/" }
+        let(:pypi_response) do
+          fixture("pypi", "pypi_simple_response_attrs.html")
+        end
 
         let(:security_advisories) do
           [
@@ -336,6 +398,7 @@ RSpec.describe Dependabot::Python::UpdateChecker do
             dependency_files: dependency_files,
             credentials: credentials,
             ignored_versions: ignored_versions,
+            raise_on_ignored: raise_on_ignored,
             security_advisories: security_advisories
           ).and_call_original
         expect(checker.latest_resolvable_version_with_no_unlock).
@@ -458,15 +521,17 @@ RSpec.describe Dependabot::Python::UpdateChecker do
         )
       end
 
-      let(:pypi_url) { "https://pypi.python.org/simple/requests/" }
-      let(:pypi_response) { fixture("pypi_simple_response_requests.html") }
+      let(:pypi_url) { "https://pypi.org/simple/requests/" }
+      let(:pypi_response) do
+        fixture("pypi", "pypi_simple_response_requests.html")
+      end
 
       context "for a library" do
         before do
-          stub_request(:get, "https://pypi.org/pypi/pendulum/json").
+          stub_request(:get, "https://pypi.org/pypi/pendulum/json/").
             to_return(
               status: 200,
-              body: fixture("pypi_response_pendulum.json")
+              body: fixture("pypi", "pypi_response_pendulum.json")
             )
         end
 
@@ -475,7 +540,7 @@ RSpec.describe Dependabot::Python::UpdateChecker do
 
       context "for a non-library" do
         before do
-          stub_request(:get, "https://pypi.org/pypi/pendulum/json").
+          stub_request(:get, "https://pypi.org/pypi/pendulum/json/").
             to_return(status: 404)
         end
 

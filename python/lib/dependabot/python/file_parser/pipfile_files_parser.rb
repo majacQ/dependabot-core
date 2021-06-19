@@ -6,6 +6,7 @@ require "dependabot/dependency"
 require "dependabot/file_parsers/base/dependency_set"
 require "dependabot/python/file_parser"
 require "dependabot/errors"
+require "dependabot/python/name_normaliser"
 
 module Dependabot
   module Python
@@ -47,8 +48,13 @@ module Dependabot
 
             parsed_pipfile[keys[:pipfile]].map do |dep_name, req|
               group = keys[:lockfile]
-              next unless req.is_a?(String) || req["version"]
+              next unless specifies_version?(req)
+              next if git_or_path_requirement?(req)
               next if pipfile_lock && !dependency_version(dep_name, req, group)
+
+              # Empty requirements are not allowed in Dependabot::Dependency and
+              # equivalent to "*" (latest available version)
+              req = "*" if req == ""
 
               dependencies <<
                 Dependency.new(
@@ -84,13 +90,15 @@ module Dependabot
                         when Hash then details["version"]
                         end
               next unless version
+              next if git_or_path_requirement?(details)
 
               dependencies <<
                 Dependency.new(
                   name: dep_name,
                   version: version&.gsub(/^===?/, ""),
                   requirements: [],
-                  package_manager: "pip"
+                  package_manager: "pip",
+                  subdependency_metadata: [{ production: key != "develop" }]
                 )
             end
           end
@@ -119,9 +127,20 @@ module Dependabot
           end
         end
 
-        # See https://www.python.org/dev/peps/pep-0503/#normalized-names
+        def specifies_version?(req)
+          return true if req.is_a?(String)
+
+          req["version"]
+        end
+
+        def git_or_path_requirement?(req)
+          return false unless req.is_a?(Hash)
+
+          %w(git path).any? { |k| req.key?(k) }
+        end
+
         def normalised_name(name)
-          name.downcase.gsub(/[-_.]+/, "-")
+          NameNormaliser.normalise(name)
         end
 
         def parsed_pipfile

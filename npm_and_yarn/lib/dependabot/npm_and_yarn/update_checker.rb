@@ -13,6 +13,7 @@ module Dependabot
       require_relative "update_checker/latest_version_finder"
       require_relative "update_checker/version_resolver"
       require_relative "update_checker/subdependency_version_resolver"
+      require_relative "update_checker/conflicting_dependency_resolver"
 
       def latest_version
         @latest_version ||=
@@ -36,22 +37,31 @@ module Dependabot
           end
       end
 
+      def lowest_security_fix_version
+        latest_version_finder.lowest_security_fix_version
+      end
+
       def lowest_resolvable_security_fix_version
         raise "Dependency not vulnerable!" unless vulnerable?
+        # NOTE: we currently don't resolve transitive/sub-dependencies as
+        # npm/yarn don't provide any control over updating to a specific
+        # sub-dependency
         return latest_resolvable_version unless dependency.top_level?
 
         # TODO: Might want to check resolvability here?
-        latest_version_finder.lowest_security_fix_version
+        lowest_security_fix_version
       end
 
       def latest_resolvable_version_with_no_unlock
         return latest_resolvable_version unless dependency.top_level?
 
-        if git_dependency?
-          return latest_resolvable_version_with_no_unlock_for_git_dependency
-        end
+        return latest_resolvable_version_with_no_unlock_for_git_dependency if git_dependency?
 
         latest_version_finder.latest_version_with_no_unlock
+      end
+
+      def latest_resolvable_previous_version(updated_version)
+        version_resolver.latest_resolvable_previous_version(updated_version)
       end
 
       def updated_requirements
@@ -78,12 +88,20 @@ module Dependabot
 
       def requirements_update_strategy
         # If passed in as an option (in the base class) honour that option
-        if @requirements_update_strategy
-          return @requirements_update_strategy.to_sym
-        end
+        return @requirements_update_strategy.to_sym if @requirements_update_strategy
 
         # Otherwise, widen ranges for libraries and bump versions for apps
         library? ? :widen_ranges : :bump_versions
+      end
+
+      def conflicting_dependencies
+        ConflictingDependencyResolver.new(
+          dependency_files: dependency_files,
+          credentials: credentials
+        ).conflicting_dependencies(
+          dependency: dependency,
+          target_version: lowest_security_fix_version
+        )
       end
 
       private
@@ -104,17 +122,19 @@ module Dependabot
 
       def build_updated_dependency(update_details)
         original_dep = update_details.fetch(:dependency)
+        version = update_details.fetch(:version).to_s
+        previous_version = update_details.fetch(:previous_version)&.to_s
 
         Dependency.new(
           name: original_dep.name,
-          version: update_details.fetch(:version).to_s,
+          version: version,
           requirements: RequirementsUpdater.new(
             requirements: original_dep.requirements,
             updated_source: original_dep == dependency ? updated_source : nil,
-            latest_resolvable_version: update_details[:version].to_s,
+            latest_resolvable_version: version,
             update_strategy: requirements_update_strategy
           ).updated_requirements,
-          previous_version: original_dep.version,
+          previous_version: previous_version,
           previous_requirements: original_dep.requirements,
           package_manager: original_dep.package_manager
         )
@@ -145,17 +165,13 @@ module Dependabot
 
       def latest_version_for_git_dependency
         @latest_version_for_git_dependency ||=
-          begin
-            # If there's been a release that includes the current pinned ref
-            # or that the current branch is behind, we switch to that release.
-            if git_branch_or_ref_in_latest_release?
-              latest_released_version
-            elsif version_class.correct?(dependency.version)
-              latest_git_version_details[:version] &&
-                version_class.new(latest_git_version_details[:version])
-            else
-              latest_git_version_details[:sha]
-            end
+          if git_branch_or_ref_in_latest_release?
+            latest_released_version
+          elsif version_class.correct?(dependency.version)
+            latest_git_version_details[:version] &&
+              version_class.new(latest_git_version_details[:version])
+          else
+            latest_git_version_details[:sha]
           end
       end
 
@@ -175,9 +191,7 @@ module Dependabot
       def git_branch_or_ref_in_latest_release?
         return false unless latest_released_version
 
-        if defined?(@git_branch_or_ref_in_latest_release)
-          return @git_branch_or_ref_in_latest_release
-        end
+        return @git_branch_or_ref_in_latest_release if defined?(@git_branch_or_ref_in_latest_release)
 
         @git_branch_or_ref_in_latest_release ||=
           git_commit_checker.branch_or_ref_in_release?(latest_released_version)
@@ -199,6 +213,7 @@ module Dependabot
             credentials: credentials,
             dependency_files: dependency_files,
             ignored_versions: ignored_versions,
+            raise_on_ignored: raise_on_ignored,
             security_advisories: security_advisories
           )
       end
@@ -247,9 +262,7 @@ module Dependabot
 
         # Otherwise, if the gem isn't pinned, the latest version is just the
         # latest commit for the specified branch.
-        unless git_commit_checker.pinned?
-          return { sha: git_commit_checker.head_commit_for_current_branch }
-        end
+        return { sha: git_commit_checker.head_commit_for_current_branch } unless git_commit_checker.pinned?
 
         # If the dependency is pinned to a tag that doesn't look like a
         # version then there's nothing we can do.
@@ -284,9 +297,8 @@ module Dependabot
 
       def dependency_source_details
         sources =
-          dependency.requirements.map { |r| r.fetch(:source) }.uniq.compact
-
-        raise "Multiple sources! #{sources.join(', ')}" if sources.count > 1
+          dependency.requirements.map { |r| r.fetch(:source) }.uniq.compact.
+          sort_by { |source| RegistryFinder.central_registry?(source[:url]) ? 1 : 0 }
 
         sources.first
       end
@@ -300,7 +312,9 @@ module Dependabot
         @git_commit_checker ||=
           GitCommitChecker.new(
             dependency: dependency,
-            credentials: credentials
+            credentials: credentials,
+            ignored_versions: ignored_versions,
+            raise_on_ignored: raise_on_ignored
           )
       end
     end

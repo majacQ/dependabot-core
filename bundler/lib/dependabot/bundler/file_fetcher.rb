@@ -14,9 +14,7 @@ module Dependabot
       require "dependabot/bundler/file_fetcher/require_relative_finder"
 
       def self.required_files_in?(filenames)
-        if filenames.any? { |name| name.match?(%r{^[^/]*\.gemspec$}) }
-          return true
-        end
+        return true if filenames.any? { |name| name.match?(%r{^[^/]*\.gemspec$}) }
 
         filenames.include?("Gemfile") || filenames.include?("gems.rb")
       end
@@ -133,9 +131,7 @@ module Dependabot
           unfetchable_gems << path.basename.to_s
         end
 
-        if unfetchable_gems.any?
-          raise Dependabot::PathDependenciesNotReachable, unfetchable_gems
-        end
+        raise Dependabot::PathDependenciesNotReachable, unfetchable_gems if unfetchable_gems.any?
 
         gemspec_files.tap { |ar| ar.each { |f| f.support_file = true } }
       end
@@ -159,16 +155,15 @@ module Dependabot
 
       def fetch_gemspecs_from_directory(dir_path)
         repo_contents(dir: dir_path, fetch_submodules: true).
-          select { |f| f.name.end_with?(".gemspec") }.
+          select { |f| f.name.end_with?(".gemspec", ".specification") }.
           map { |f| File.join(dir_path, f.name) }.
           map { |fp| fetch_file_from_host(fp, fetch_submodules: true) }
       end
 
       def fetch_path_gemspec_paths
         if lockfile
-          parsed_lockfile = ::Bundler::LockfileParser.new(
-            sanitized_lockfile_content
-          )
+          parsed_lockfile = ::Bundler::LockfileParser.
+                            new(sanitized_lockfile_content)
           parsed_lockfile.specs.
             select { |s| s.source.instance_of?(::Bundler::Source::Path) }.
             map { |s| s.source.path }.uniq
@@ -180,6 +175,10 @@ module Dependabot
         end
       rescue ::Bundler::LockfileError
         raise Dependabot::DependencyFileNotParseable, lockfile.path
+      rescue ::Bundler::Plugin::UnknownSourceError
+        # Quietly ignore plugin errors - we'll raise a better error during
+        # parsing
+        []
       end
 
       def child_gemfiles
@@ -189,6 +188,7 @@ module Dependabot
           fetch_child_gemfiles(file: gemfile, previously_fetched_files: [])
       end
 
+      # TODO: Stop sanitizing the lockfile once we have bundler 2 installed
       def sanitized_lockfile_content
         regex = FileUpdater::LockfileUpdater::LOCKFILE_ENDING
         lockfile.content.gsub(regex, "")

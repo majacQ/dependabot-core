@@ -64,12 +64,12 @@ module Dependabot
           # case, the best we can do is return nil.
           return [] unless releases.any?
 
-          if updated_release && version_class.correct?(dependency.version)
+          if updated_release && version_class.correct?(new_version)
             releases = filter_releases_using_updated_release(releases)
             filter_releases_using_updated_version(releases, conservative: true)
           elsif updated_release
             filter_releases_using_updated_release(releases)
-          elsif version_class.correct?(dependency.version)
+          elsif version_class.correct?(new_version)
             filter_releases_using_updated_version(releases, conservative: false)
           else
             [updated_release].compact
@@ -77,7 +77,6 @@ module Dependabot
         end
 
         def releases_since_previous_version
-          previous_version = dependency.previous_version
           return [updated_release].compact unless previous_version
 
           if previous_release && version_class.correct?(previous_version)
@@ -108,8 +107,6 @@ module Dependabot
         end
 
         def filter_releases_using_previous_version(releases, conservative:)
-          previous_version = version_class.new(dependency.previous_version)
-
           releases.reject do |release|
             cleaned_tag = release.tag_name.gsub(/^[^0-9]*/, "")
             cleaned_name = release.name&.gsub(/^[^0-9]*/, "")
@@ -125,12 +122,12 @@ module Dependabot
 
             # Reject any releases that are less than the previous version
             # (e.g., if two major versions are being maintained)
-            tag_version <= previous_version
+            tag_version <= version_class.new(previous_version)
           end
         end
 
         def filter_releases_using_updated_version(releases, conservative:)
-          updated_version = version_class.new(dependency.version)
+          updated_version = version_class.new(new_version)
 
           releases.reject do |release|
             cleaned_tag = release.tag_name.gsub(/^[^0-9]*/, "")
@@ -152,11 +149,11 @@ module Dependabot
         end
 
         def updated_release
-          release_for_version(dependency.version)
+          release_for_version(new_version)
         end
 
         def previous_release
-          release_for_version(dependency.previous_version)
+          release_for_version(previous_version)
         end
 
         def release_for_version(version)
@@ -170,7 +167,7 @@ module Dependabot
 
         def serialize_release(release)
           rel = release
-          title = "## #{rel.name.to_s != '' ? rel.name : rel.tag_name}\n"
+          title = "## #{rel.name.to_s == '' ? rel.tag_name : rel.name}\n"
           body = if rel.body.to_s.gsub(/\n*\z/m, "") == ""
                    "No release notes provided."
                  else
@@ -181,7 +178,7 @@ module Dependabot
         end
 
         def release_body_includes_title?(release)
-          title = release.name.to_s != "" ? release.name : release.tag_name
+          title = release.name.to_s == "" ? release.tag_name : release.name
           release.body.to_s.match?(/\A\s*\#*\s*#{Regexp.quote(title)}/m)
         end
 
@@ -244,6 +241,56 @@ module Dependabot
           end
         rescue Gitlab::Error::NotFound
           []
+        end
+
+        def previous_version
+          # If we don't have a previous version, we *may* still be able to
+          # figure one out if a ref was provided and has been changed (in which
+          # case the previous ref was essentially the version).
+          if dependency.previous_version.nil?
+            return ref_changed? ? previous_ref : nil
+          end
+
+          # Previous version looks like a git SHA and there's a previous ref, we
+          # could be changing to a nil previous ref in which case we want to
+          # fall back to tge sha version
+          if dependency.previous_version.match?(/^[0-9a-f]{40}$/) &&
+             ref_changed? && previous_ref
+            previous_ref
+          else
+            dependency.previous_version
+          end
+        end
+
+        def new_version
+          # New version looks like a git SHA and there's a new ref, guarding
+          # against changes to a nil new_ref (not certain this can actually
+          # happen atm)
+          if dependency.version.match?(/^[0-9a-f]{40}$/) && ref_changed? &&
+             new_ref
+            return new_ref
+          end
+
+          dependency.version
+        end
+
+        def previous_ref
+          previous_refs = dependency.previous_requirements.map do |r|
+            r.dig(:source, "ref") || r.dig(:source, :ref)
+          end.compact.uniq
+          return previous_refs.first if previous_refs.count == 1
+        end
+
+        def new_ref
+          new_refs = dependency.requirements.map do |r|
+            r.dig(:source, "ref") || r.dig(:source, :ref)
+          end.compact.uniq
+          return new_refs.first if new_refs.count == 1
+        end
+
+        def ref_changed?
+          # We could go from multiple previous refs (nil) to a single new ref
+          previous_ref != new_ref
         end
 
         def gitlab_client

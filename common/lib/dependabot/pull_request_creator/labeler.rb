@@ -2,12 +2,12 @@
 
 require "octokit"
 require "dependabot/pull_request_creator"
-
-# rubocop:disable Metrics/ClassLength
 module Dependabot
   class PullRequestCreator
     class Labeler
       DEPENDENCIES_LABEL_REGEX = %r{^[^/]*dependenc[^/]+$}i.freeze
+      DEFAULT_DEPENDENCIES_LABEL = "dependencies"
+      DEFAULT_SECURITY_LABEL = "security"
 
       @package_manager_labels = {}
 
@@ -48,7 +48,7 @@ module Dependabot
         [
           *default_labels_for_pr,
           includes_security_fixes? ? security_label : nil,
-          semver_labels_exist? ? semver_label : nil,
+          label_update_type? ? semver_label : nil,
           automerge_candidate? ? automerge_label : nil
         ].compact.uniq
       end
@@ -89,14 +89,21 @@ module Dependabot
         @automerge_candidate
       end
 
-      # rubocop:disable Metrics/CyclomaticComplexity
-      # rubocop:disable Metrics/PerceivedComplexity
       def update_type
         return unless dependencies.any?(&:previous_version)
 
-        precison = dependencies.map do |dep|
-          new_version_parts = version(dep).split(".")
-          old_version_parts = previous_version(dep)&.split(".") || []
+        case precision
+        when 0 then "non-semver"
+        when 1 then "major"
+        when 2 then "minor"
+        when 3 then "patch"
+        end
+      end
+
+      def precision
+        dependencies.map do |dep|
+          new_version_parts = version(dep).split(/[.+]/)
+          old_version_parts = previous_version(dep)&.split(/[.+]/) || []
           all_parts = new_version_parts.first(3) + old_version_parts.first(3)
           next 0 unless all_parts.all? { |part| part.to_i.to_s == part }
           next 1 if new_version_parts[0] != old_version_parts[0]
@@ -104,17 +111,9 @@ module Dependabot
 
           3
         end.min
-
-        case precison
-        when 0 then "non-semver"
-        when 1 then "major"
-        when 2 then "minor"
-        when 3 then "patch"
-        end
       end
-      # rubocop:enable Metrics/CyclomaticComplexity
-      # rubocop:enable Metrics/PerceivedComplexity
 
+      # rubocop:disable Metrics/PerceivedComplexity
       def version(dep)
         return dep.version if version_class.correct?(dep.version)
 
@@ -129,7 +128,9 @@ module Dependabot
 
         version_from_ref
       end
+      # rubocop:enable Metrics/PerceivedComplexity
 
+      # rubocop:disable Metrics/PerceivedComplexity
       def previous_version(dep)
         version_str = dep.previous_version
         return version_str if version_class.correct?(version_str)
@@ -146,6 +147,7 @@ module Dependabot
 
         version_from_ref
       end
+      # rubocop:enable Metrics/PerceivedComplexity
 
       def create_default_dependencies_label_if_required
         return if custom_labels
@@ -173,10 +175,16 @@ module Dependabot
         if custom_labels then custom_labels & labels
         else
           [
-            labels.find { |l| l.match?(DEPENDENCIES_LABEL_REGEX) },
+            default_dependencies_label,
             label_language? ? language_label : nil
           ].compact
         end
+      end
+
+      # Find the exact match first and then fallback to *dependenc* label
+      def default_dependencies_label
+        labels.find { |l| l == DEFAULT_DEPENDENCIES_LABEL } ||
+          labels.find { |l| l.match?(DEPENDENCIES_LABEL_REGEX) }
       end
 
       def dependencies_label_exists?
@@ -187,11 +195,19 @@ module Dependabot
         !security_label.nil?
       end
 
+      # Find the exact match first and then fallback to * security* label
       def security_label
-        labels.find { |l| l.match?(/security/i) }
+        labels.find { |l| l == DEFAULT_SECURITY_LABEL } ||
+          labels.find { |l| l.match?(/security/i) }
       end
 
-      def semver_labels_exist?
+      def label_update_type?
+        # If a `skip-release` label exists then this repo is likely to be using
+        # an auto-releasing service (like auto). We don't want to hijack that
+        # service's labels.
+        return false if labels.map(&:downcase).include?("skip-release")
+
+        # Otherwise, check whether labels exist for each update type
         (%w(major minor patch) - labels.map(&:downcase)).empty?
       end
 
@@ -221,6 +237,7 @@ module Dependabot
           case source.provider
           when "github" then fetch_github_labels
           when "gitlab" then fetch_gitlab_labels
+          when "azure" then fetch_azure_labels
           else raise "Unsupported provider #{source.provider}"
           end
       end
@@ -251,10 +268,24 @@ module Dependabot
           map(&:name)
       end
 
+      def fetch_azure_labels
+        langauge_name =
+          self.class.label_details_for_package_manager(package_manager).
+          fetch(:name)
+
+        @labels = [
+          *@labels,
+          DEFAULT_DEPENDENCIES_LABEL,
+          DEFAULT_SECURITY_LABEL,
+          langauge_name
+        ].uniq
+      end
+
       def create_dependencies_label
         case source.provider
         when "github" then create_github_dependencies_label
         when "gitlab" then create_gitlab_dependencies_label
+        when "azure" then @labels # Azure does not have centralised labels
         else raise "Unsupported provider #{source.provider}"
         end
       end
@@ -263,6 +294,7 @@ module Dependabot
         case source.provider
         when "github" then create_github_security_label
         when "gitlab" then create_gitlab_security_label
+        when "azure" then @labels # Azure does not have centralised labels
         else raise "Unsupported provider #{source.provider}"
         end
       end
@@ -271,50 +303,51 @@ module Dependabot
         case source.provider
         when "github" then create_github_language_label
         when "gitlab" then create_gitlab_language_label
+        when "azure" then @labels # Azure does not have centralised labels
         else raise "Unsupported provider #{source.provider}"
         end
       end
 
       def create_github_dependencies_label
         github_client_for_source.add_label(
-          source.repo, "dependencies", "0366d6",
+          source.repo, DEFAULT_DEPENDENCIES_LABEL, "0366d6",
           description: "Pull requests that update a dependency file",
           accept: "application/vnd.github.symmetra-preview+json"
         )
-        @labels = [*@labels, "dependencies"].uniq
+        @labels = [*@labels, DEFAULT_DEPENDENCIES_LABEL].uniq
       rescue Octokit::UnprocessableEntity => e
         raise unless e.errors.first.fetch(:code) == "already_exists"
 
-        @labels = [*@labels, "dependencies"].uniq
+        @labels = [*@labels, DEFAULT_DEPENDENCIES_LABEL].uniq
       end
 
       def create_gitlab_dependencies_label
         gitlab_client_for_source.create_label(
-          source.repo, "dependencies", "#0366d6",
+          source.repo, DEFAULT_DEPENDENCIES_LABEL, "#0366d6",
           description: "Pull requests that update a dependency file"
         )
-        @labels = [*@labels, "dependencies"].uniq
+        @labels = [*@labels, DEFAULT_DEPENDENCIES_LABEL].uniq
       end
 
       def create_github_security_label
         github_client_for_source.add_label(
-          source.repo, "security", "ee0701",
+          source.repo, DEFAULT_SECURITY_LABEL, "ee0701",
           description: "Pull requests that address a security vulnerability",
           accept: "application/vnd.github.symmetra-preview+json"
         )
-        @labels = [*@labels, "security"].uniq
+        @labels = [*@labels, DEFAULT_SECURITY_LABEL].uniq
       rescue Octokit::UnprocessableEntity => e
         raise unless e.errors.first.fetch(:code) == "already_exists"
 
-        @labels = [*@labels, "security"].uniq
+        @labels = [*@labels, DEFAULT_SECURITY_LABEL].uniq
       end
 
       def create_gitlab_security_label
         gitlab_client_for_source.create_label(
-          source.repo, "security", "#ee0701",
+          source.repo, DEFAULT_SECURITY_LABEL, "#ee0701",
           description: "Pull requests that address a security vulnerability"
         )
-        @labels = [*@labels, "security"].uniq
+        @labels = [*@labels, DEFAULT_SECURITY_LABEL].uniq
       end
 
       def create_github_language_label
@@ -376,4 +409,3 @@ module Dependabot
     end
   end
 end
-# rubocop:enable Metrics/ClassLength

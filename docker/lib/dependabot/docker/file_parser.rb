@@ -13,22 +13,24 @@ module Dependabot
     class FileParser < Dependabot::FileParsers::Base
       require "dependabot/file_parsers/base/dependency_set"
 
-      # Detials of Docker regular expressions is at
+      # Details of Docker regular expressions is at
       # https://github.com/docker/distribution/blob/master/reference/regexp.go
       DOMAIN_COMPONENT =
-        /(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])/.freeze
+        /(?:[[:alnum:]]|[[:alnum:]][[[:alnum:]]-]*[[:alnum:]])/.freeze
       DOMAIN = /(?:#{DOMAIN_COMPONENT}(?:\.#{DOMAIN_COMPONENT})+)/.freeze
-      REGISTRY = /(?<registry>#{DOMAIN}(?::[0-9]+)?)/.freeze
+      REGISTRY = /(?<registry>#{DOMAIN}(?::\d+)?)/.freeze
 
-      NAME_COMPONENT = /(?:[a-z0-9]+(?:(?:[._]|__|[-]*)[a-z0-9]+)*)/.freeze
+      NAME_COMPONENT = /(?:[a-z\d]+(?:(?:[._]|__|[-]*)[a-z\d]+)*)/.freeze
       IMAGE = %r{(?<image>#{NAME_COMPONENT}(?:/#{NAME_COMPONENT})*)}.freeze
 
-      FROM = /[Ff][Rr][Oo][Mm]/.freeze
+      FROM = /FROM/i.freeze
+      PLATFORM = /--platform\=(?<platform>\S+)/.freeze
       TAG = /:(?<tag>[\w][\w.-]{0,127})/.freeze
       DIGEST = /@(?<digest>[^\s]+)/.freeze
-      NAME = /\s+AS\s+(?<name>[a-zA-Z0-9_-]+)/.freeze
+      NAME = /\s+AS\s+(?<name>[\w-]+)/.freeze
       FROM_LINE =
-        %r{^#{FROM}\s+(#{REGISTRY}/)?#{IMAGE}#{TAG}?#{DIGEST}?#{NAME}?}.freeze
+        %r{^#{FROM}\s+(#{PLATFORM}\s+)?(#{REGISTRY}/)?
+          #{IMAGE}#{TAG}?#{DIGEST}?#{NAME}?}x.freeze
 
       AWS_ECR_URL = /dkr\.ecr\.(?<region>[^.]+).amazonaws\.com/.freeze
 
@@ -40,9 +42,7 @@ module Dependabot
             next unless FROM_LINE.match?(line)
 
             parsed_from_line = FROM_LINE.match(line).named_captures
-            if parsed_from_line["registry"] == "docker.io"
-              parsed_from_line["registry"] = nil
-            end
+            parsed_from_line["registry"] = nil if parsed_from_line["registry"] == "docker.io"
 
             version = version_from(parsed_from_line)
             next unless version
@@ -85,17 +85,11 @@ module Dependabot
       def source_from(parsed_from_line)
         source = {}
 
-        if parsed_from_line.fetch("registry")
-          source[:registry] = parsed_from_line.fetch("registry")
-        end
+        source[:registry] = parsed_from_line.fetch("registry") if parsed_from_line.fetch("registry")
 
-        if parsed_from_line.fetch("tag")
-          source[:tag] = parsed_from_line.fetch("tag")
-        end
+        source[:tag] = parsed_from_line.fetch("tag") if parsed_from_line.fetch("tag")
 
-        if parsed_from_line.fetch("digest")
-          source[:digest] = parsed_from_line.fetch("digest")
-        end
+        source[:digest] = parsed_from_line.fetch("digest") if parsed_from_line.fetch("digest")
 
         source
       end
@@ -104,9 +98,9 @@ module Dependabot
         return unless digest
 
         repo = docker_repo_name(image, registry)
-        registry_client = docker_registry_client(registry)
-        registry_client.tags(repo).fetch("tags").find do |tag|
-          digest == registry_client.digest(repo, tag)
+        client = docker_registry_client(registry)
+        client.tags(repo, auto_paginate: true).fetch("tags").find do |tag|
+          digest == client.digest(repo, tag)
         rescue DockerRegistry2::NotFound
           # Shouldn't happen, but it does. Example of existing tag with
           # no manifest is "library/python", "2-windowsservercore".

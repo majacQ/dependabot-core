@@ -172,7 +172,7 @@ RSpec.describe Dependabot::Hex::UpdateChecker::FilePreparer do
             groups: [],
             source: {
               type: "git",
-              url: "https://github.com/phoenixframework/phoenix.git",
+              url: "https://github.com/dependabot-fixtures/phoenix.git",
               branch: "master",
               ref: "v1.2.0"
             }
@@ -181,17 +181,17 @@ RSpec.describe Dependabot::Hex::UpdateChecker::FilePreparer do
 
         it "updates the pin" do
           expect(prepared_mixfile.content).to include(
-            '{:phoenix, ">= 0", github: "phoenixframework/phoenix", '\
+            '{:phoenix, ">= 0", github: "dependabot-fixtures/phoenix", '\
             'ref: "v1.2.1"}'
           )
         end
 
-        context "that uses single quoates" do
+        context "that uses single quotes" do
           let(:mixfile_fixture_name) { "git_source_with_charlist" }
 
           it "updates the pin" do
             expect(prepared_mixfile.content).to include(
-              '{:phoenix, ">= 0", github: "phoenixframework/phoenix", '\
+              '{:phoenix, ">= 0", github: "dependabot-fixtures/phoenix", '\
               "ref: \'v1.2.1\'}"
             )
           end

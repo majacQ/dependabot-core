@@ -24,9 +24,7 @@ module Dependabot
       def initialize(version)
         @version_string = version.to_s
 
-        if version.to_s.include?("+")
-          version, @build_info = version.to_s.split("+")
-        end
+        version, @build_info = version.to_s.split("+") if version.to_s.include?("+")
 
         super
       end
@@ -40,9 +38,49 @@ module Dependabot
       end
 
       def <=>(other)
-        version_comparison = super(other)
+        version_comparison = compare_release(other)
         return version_comparison unless version_comparison.zero?
 
+        version_comparison = compare_prerelease_part(other)
+        return version_comparison unless version_comparison.zero?
+
+        compare_build_info(other)
+      end
+
+      def compare_release(other)
+        release_str = @version_string.split("-").first&.split("+")&.first || ""
+        other_release_str = other.to_s.split("-").first&.split("+")&.first || ""
+
+        Gem::Version.new(release_str).<=>(Gem::Version.new(other_release_str))
+      end
+
+      # rubocop:disable Metrics/PerceivedComplexity
+      def compare_prerelease_part(other)
+        release_str = @version_string.split("-").first&.split("+")&.first || ""
+        prerelease_string = @version_string.
+                            sub(release_str, "").
+                            sub("-", "").
+                            split("+").
+                            first
+        prerelease_string = nil if prerelease_string == ""
+
+        other_release_str = other.to_s.split("-").first&.split("+")&.first || ""
+        other_prerelease_string = other.to_s.
+                                  sub(other_release_str, "").
+                                  sub("-", "").
+                                  split("+").
+                                  first
+        other_prerelease_string = nil if other_prerelease_string == ""
+
+        return -1 if prerelease_string && !other_prerelease_string
+        return 1 if !prerelease_string && other_prerelease_string
+
+        prerelease_string.<=>(other_prerelease_string)
+      end
+
+      # rubocop:enable Metrics/PerceivedComplexity
+
+      def compare_build_info(other)
         return build_info.nil? ? 0 : 1 unless other.is_a?(Nuget::Version)
 
         # Build information comparison

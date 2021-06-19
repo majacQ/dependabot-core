@@ -286,19 +286,19 @@ RSpec.describe Dependabot::Cargo::FileParser do
           end
           let(:workspace_child) do
             Dependabot::DependencyFile.new(
-              name: "lib/sub_crate/Cargo.toml",
+              name: "src/sub_crate/Cargo.toml",
               content: fixture("manifests", "workspace_child")
             )
           end
           let(:workspace_child2) do
             Dependabot::DependencyFile.new(
-              name: "lib/sub_crate2/Cargo.toml",
+              name: "src/sub_crate2/Cargo.toml",
               content: workspace_child2_body
             )
           end
           let(:workspace_child3) do
             Dependabot::DependencyFile.new(
-              name: "lib/sub_crate3/Cargo.toml",
+              name: "src/sub_crate3/Cargo.toml",
               content: workspace_child2_body
             )
           end
@@ -323,7 +323,7 @@ RSpec.describe Dependabot::Cargo::FileParser do
                 expect(dependency.requirements).to eq(
                   [{
                     requirement: "=0.4.0",
-                    file: "lib/sub_crate/Cargo.toml",
+                    file: "src/sub_crate/Cargo.toml",
                     groups: ["dependencies"],
                     source: nil
                   }]
@@ -342,13 +342,13 @@ RSpec.describe Dependabot::Cargo::FileParser do
                   [
                     {
                       requirement: nil,
-                      file: "lib/sub_crate2/Cargo.toml",
+                      file: "src/sub_crate2/Cargo.toml",
                       groups: ["dependencies"],
                       source: { type: "path" }
                     },
                     {
                       requirement: nil,
-                      file: "lib/sub_crate3/Cargo.toml",
+                      file: "src/sub_crate3/Cargo.toml",
                       groups: ["dependencies"],
                       source: { type: "path" }
                     }
@@ -771,6 +771,12 @@ RSpec.describe Dependabot::Cargo::FileParser do
             end
           end
         end
+      end
+
+      context "with resolver version 2" do
+        let(:manifest_fixture_name) { "resolver2" }
+        let(:lockfile_fixture_name) { "no_dependencies" }
+        it { is_expected.to eq([]) }
       end
 
       context "with no dependencies" do

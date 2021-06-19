@@ -4,6 +4,7 @@ require "json"
 require "dependabot/dependency_file"
 require "dependabot/errors"
 require "dependabot/npm_and_yarn/file_fetcher"
+require "dependabot/npm_and_yarn/file_parser/yarn_lockfile_parser"
 
 module Dependabot
   module NpmAndYarn
@@ -35,19 +36,22 @@ module Dependabot
                     :directory
 
         def details_from_yarn_lock
+          path_starts = FileFetcher::PATH_DEPENDENCY_STARTS
           parsed_yarn_lock.to_a.
             find do |n, _|
               next false unless n.split(/(?<=\w)\@/).first == dependency_name
 
-              n.split(/(?<=\w)\@/).last.start_with?("file:")
+              n.split(/(?<=\w)\@/).last.start_with?(*path_starts)
             end&.last
         end
 
         def details_from_npm_lock
-          parsed_package_lock.fetch("dependencies", []).to_a.
-            select { |_, v| v.fetch("version", "").start_with?("file:") }.
-            find { |n, _| n == dependency_name }&.
-            last
+          path_starts = FileFetcher::NPM_PATH_DEPENDENCY_STARTS
+          path_deps = parsed_package_lock.fetch("dependencies", []).to_a.
+                      select do |_, v|
+                        v.fetch("version", "").start_with?(*path_starts)
+                      end
+          path_deps.find { |n, _| n == dependency_name }&.last
         end
 
         def build_path_dep_content(dependency_name)
@@ -85,21 +89,24 @@ module Dependabot
         def replace_yarn_lock_file_paths(dependencies_hash)
           return unless dependencies_hash
 
-          dependencies_hash.each_with_object({}) do |(k, v), obj|
-            obj[k] = v
-            next unless v.start_with?("file:")
+          dependencies_hash.each_with_object({}) do |(name, value), obj|
+            obj[name] = value
+            next unless value.start_with?(*FileFetcher::PATH_DEPENDENCY_STARTS)
 
             path_from_base =
               parsed_yarn_lock.to_a.
               find do |n, _|
-                next false unless n.split(/(?<=\w)\@/).first == k
+                next false unless n.split(/(?<=\w)\@/).first == name
 
-                n.split(/(?<=\w)\@/).last.start_with?("file:")
-              end&.first&.split(/(?<=\w)\@/)&.last&.gsub("file:", "")
+                n.split(/(?<=\w)\@/).last.
+                  start_with?(*FileFetcher::PATH_DEPENDENCY_STARTS)
+              end&.first&.split(/(?<=\w)\@/)&.last
 
             next unless path_from_base
 
-            obj[k] = "file:" + File.join(inverted_path, path_from_base)
+            cleaned_path = path_from_base.
+                           gsub(FileFetcher::PATH_DEPENDENCY_CLEAN_REGEX, "")
+            obj[name] = "file:" + File.join(inverted_path, cleaned_path)
           end
         end
 
@@ -114,20 +121,8 @@ module Dependabot
         def parsed_yarn_lock
           return {} unless yarn_lock
 
-          # This is *extremely* crude, but saves us from having to shell out
-          # to Yarn, which may not be safe
           @parsed_yarn_lock ||=
-            begin
-              content = yarn_lock.content.
-                        lines.
-                        map { |l| l.match?(/^[\w"]/) ? l.split(", ").last : l }.
-                        join.
-                        gsub(/(?<=\w|")\s(?=\w|")/, ": ")
-
-              YAML.safe_load(content)
-            end
-        rescue Psych::SyntaxError, Psych::DisallowedClass, Psych::BadAlias
-          @parsed_yarn_lock ||= {}
+            FileParser::YarnLockfileParser.new(lockfile: yarn_lock).parse
         end
 
         # The path back to the root lockfile

@@ -10,6 +10,7 @@ RSpec.describe Dependabot::UpdateCheckers::Base do
     described_class.new(
       dependency: dependency,
       dependency_files: [],
+      ignored_versions: ignored_versions,
       credentials: [{
         "type" => "git_source",
         "host" => "github.com",
@@ -26,6 +27,7 @@ RSpec.describe Dependabot::UpdateCheckers::Base do
       package_manager: "dummy"
     )
   end
+  let(:ignored_versions) { [] }
   let(:latest_version) { Gem::Version.new("1.0.0") }
   let(:original_requirements) do
     [{ file: "Gemfile", requirement: ">= 0", groups: [], source: nil }]
@@ -41,6 +43,7 @@ RSpec.describe Dependabot::UpdateCheckers::Base do
   let(:updated_requirement) { ">= 1.0.0" }
   let(:latest_resolvable_version) { latest_version }
   let(:latest_resolvable_version_with_no_unlock) { latest_version }
+  let(:latest_resolvable_previous_version) { dependency.version }
   before do
     allow(updater_instance).
       to receive(:latest_version).
@@ -53,6 +56,10 @@ RSpec.describe Dependabot::UpdateCheckers::Base do
     allow(updater_instance).
       to receive(:latest_resolvable_version_with_no_unlock).
       and_return(latest_resolvable_version_with_no_unlock)
+
+    allow(updater_instance).
+      to receive(:latest_resolvable_previous_version).
+      and_return(latest_resolvable_previous_version)
 
     allow(updater_instance).
       to receive(:updated_requirements).
@@ -157,9 +164,9 @@ RSpec.describe Dependabot::UpdateCheckers::Base do
         [{ file: "Gemfile", requirement: "~> 1", groups: [], source: nil }]
       end
 
-      context "that already permits the latest version" do
+      context "when the requirement is out of date" do
         let(:updated_requirements) { requirements }
-        it { is_expected.to be_truthy }
+        it { is_expected.to be_falsy }
       end
 
       context "that doesn't yet permit the latest version" do
@@ -322,6 +329,18 @@ RSpec.describe Dependabot::UpdateCheckers::Base do
         let(:latest_resolvable_version) { Gem::Version.new("1.5.0") }
         it { is_expected.to be_falsey }
       end
+
+      context "but we don't know how to unlock the requirement" do
+        let(:updated_requirements) do
+          [{
+            file: "Gemfile",
+            requirement: :unfixable,
+            groups: [],
+            source: nil
+          }]
+        end
+        it { is_expected.to be_falsey }
+      end
     end
 
     context "when the dependency is up-to-date" do
@@ -428,6 +447,33 @@ RSpec.describe Dependabot::UpdateCheckers::Base do
       its(:package_manager) { is_expected.to eq(dependency.package_manager) }
       its(:name) { is_expected.to eq(dependency.name) }
       its(:requirements) { is_expected.to eq(updated_requirements) }
+    end
+
+    context "without a previous version" do
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "business",
+          version: nil,
+          requirements: original_requirements,
+          package_manager: "dummy"
+        )
+      end
+
+      describe "the dependency" do
+        subject { updated_dependencies.first }
+        its(:version) { is_expected.to eq("1.8.0") }
+        its(:previous_version) { is_expected.to be_nil }
+      end
+
+      context "when resolved from a requirement" do
+        let(:latest_resolvable_previous_version) { Gem::Version.new("1.4.0") }
+
+        describe "the dependency" do
+          subject { updated_dependencies.first }
+          its(:version) { is_expected.to eq("1.8.0") }
+          its(:previous_version) { is_expected.to eq("1.4.0") }
+        end
+      end
     end
 
     context "when not updating requirements" do
@@ -554,6 +600,18 @@ RSpec.describe Dependabot::UpdateCheckers::Base do
         ]
       end
       it { is_expected.to eq(false) }
+    end
+  end
+
+  describe "#ignore_requirements" do
+    subject(:ignore_requirements) { updater_instance.ignore_requirements }
+
+    it { is_expected.to eq([]) }
+
+    context "with ignored versions" do
+      let(:ignored_versions) { ["~> 1.0, < 2"] }
+
+      it { is_expected.to eq([updater_instance.requirement_class.new("~> 1.0", "< 2")]) }
     end
   end
 end

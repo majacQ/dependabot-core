@@ -74,18 +74,14 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
       before do
         stub_request(:get, "#{repo_api_url}/labels?per_page=100").
           to_return(status: 200,
-                    body: fixture("github", "labels_with_dependencies.json"),
+                    body: fixture("github", labels_fixture_name),
                     headers: json_header)
       end
+      let(:labels_fixture_name) { "labels_with_dependencies.json" }
 
       context "when the 'dependencies' label doesn't yet exist" do
+        let(:labels_fixture_name) { "labels_without_dependencies.json" }
         before do
-          stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-            to_return(
-              status: 200,
-              body: fixture("github", "labels_without_dependencies.json"),
-              headers: json_header
-            )
           stub_request(:post, "#{repo_api_url}/labels").
             to_return(status: 201,
                       body: fixture("github", "create_label.json"),
@@ -124,12 +120,7 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
       end
 
       context "when there is a custom dependencies label" do
-        before do
-          stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-            to_return(status: 200,
-                      body: fixture("github", "labels_with_custom.json"),
-                      headers: json_header)
-        end
+        let(:labels_fixture_name) { "labels_with_custom.json" }
 
         it "does not create a 'dependencies' label" do
           labeler.create_default_labels_if_required
@@ -172,13 +163,8 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
         end
 
         context "that should be ignored" do
+          let(:labels_fixture_name) { "labels_with_custom_ignored.json" }
           before do
-            stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-              to_return(
-                status: 200,
-                body: fixture("github", "labels_with_custom_ignored.json"),
-                headers: json_header
-              )
             stub_request(:post, "#{repo_api_url}/labels").
               to_return(
                 status: 201,
@@ -208,13 +194,8 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
         let(:label_language) { true }
 
         context "when the 'ruby' label doesn't yet exist" do
+          let(:labels_fixture_name) { "labels_with_dependencies.json" }
           before do
-            stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-              to_return(
-                status: 200,
-                body: fixture("github", "labels_with_dependencies.json"),
-                headers: json_header
-              )
             stub_request(:post, "#{repo_api_url}/labels").
               to_return(status: 201,
                         body: fixture("github", "create_label.json"),
@@ -238,14 +219,7 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
         end
 
         context "when the 'ruby' label already exists" do
-          before do
-            stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-              to_return(
-                status: 200,
-                body: fixture("github", "labels_with_language.json"),
-                headers: json_header
-              )
-          end
+          let(:labels_fixture_name) { "labels_with_language.json" }
 
           it "does not create a 'ruby' label" do
             labeler.create_default_labels_if_required
@@ -316,12 +290,7 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
         end
 
         context "when a 'security' label already exist" do
-          before do
-            stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-              to_return(status: 200,
-                        body: fixture("github", "labels_with_security.json"),
-                        headers: json_header)
-          end
+          let(:labels_fixture_name) { "labels_with_security.json" }
 
           it "does not creates a 'security' label" do
             labeler.create_default_labels_if_required
@@ -468,42 +437,26 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
       before do
         stub_request(:get, "#{repo_api_url}/labels?per_page=100").
           to_return(status: 200,
-                    body: fixture("github", "labels_with_dependencies.json"),
+                    body: fixture("github", labels_fixture_name),
                     headers: json_header)
       end
+      let(:labels_fixture_name) { "labels_with_dependencies.json" }
 
       context "when a 'dependencies' label exists" do
-        before do
-          stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-            to_return(status: 200,
-                      body: fixture("github", "labels_with_dependencies.json"),
-                      headers: json_header)
-        end
+        let(:labels_fixture_name) { "labels_with_dependencies.json" }
 
         it { is_expected.to eq(["dependencies"]) }
 
         context "for a security fix" do
           let(:includes_security_fixes) { true }
-          before do
-            stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-              to_return(status: 200,
-                        body: fixture("github", "labels_with_security.json"),
-                        headers: json_header)
-          end
+          let(:labels_fixture_name) { "labels_with_security.json" }
 
           it { is_expected.to eq(%w(dependencies security)) }
         end
       end
 
       context "when a 'ruby' label exists" do
-        before do
-          stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-            to_return(
-              status: 200,
-              body: fixture("github", "labels_with_language.json"),
-              headers: json_header
-            )
-        end
+        let(:labels_fixture_name) { "labels_with_language.json" }
 
         it { is_expected.to eq(["dependencies"]) }
 
@@ -514,14 +467,15 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
       end
 
       context "when a custom dependencies label exists" do
-        before do
-          stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-            to_return(status: 200,
-                      body: fixture("github", "labels_with_custom.json"),
-                      headers: json_header)
-        end
+        let(:labels_fixture_name) { "labels_with_custom.json" }
 
         it { is_expected.to eq(["Dependency: Gems"]) }
+      end
+
+      context "when a default and custom dependencies label exists" do
+        let(:labels_fixture_name) { "labels_with_custom_and_default.json" }
+
+        it { is_expected.to eq(["dependencies"]) }
       end
 
       context "when asking for custom labels" do
@@ -545,15 +499,7 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
         it { is_expected.to_not include("automerge") }
 
         context "for a repo that has an automerge label" do
-          before do
-            stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-              to_return(
-                status: 200,
-                body: fixture("github", "labels_with_automerge_tag.json"),
-                headers: json_header
-              )
-          end
-
+          let(:labels_fixture_name) { "labels_with_automerge_tag.json" }
           it { is_expected.to include("automerge") }
         end
       end
@@ -562,15 +508,7 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
         let(:automerge_candidate) { false }
 
         context "for a repo that has an automerge label" do
-          before do
-            stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-              to_return(
-                status: 200,
-                body: fixture("github", "labels_with_automerge_tag.json"),
-                headers: json_header
-              )
-          end
-
+          let(:labels_fixture_name) { "labels_with_automerge_tag.json" }
           it { is_expected.to_not include("automerge") }
         end
       end
@@ -580,12 +518,7 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
       end
 
       context "for a repo that has patch, minor and major labels" do
-        before do
-          stub_request(:get, "#{repo_api_url}/labels?per_page=100").
-            to_return(status: 200,
-                      body: fixture("github", "labels_with_semver_tags.json"),
-                      headers: json_header)
-        end
+        let(:labels_fixture_name) { "labels_with_semver_tags.json" }
 
         context "with a version and a previous version" do
           let(:previous_version) { "1.4.0" }
@@ -593,6 +526,32 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
           context "for a patch release" do
             let(:version) { "1.4.1" }
             it { is_expected.to include("patch") }
+
+            context "when the tags are for an auto-releasing tool" do
+              let(:labels_fixture_name) { "labels_with_semver_tags_auto.json" }
+              it { is_expected.to_not include("patch") }
+            end
+          end
+
+          context "for a patch release with build identifier" do
+            let(:version) { "1.4.1+10" }
+            it { is_expected.to include("patch") }
+
+            context "when the tags are for an auto-releasing tool" do
+              let(:labels_fixture_name) { "labels_with_semver_tags_auto.json" }
+              it { is_expected.to_not include("patch") }
+            end
+          end
+
+          context "for a patch release when both have build identifers" do
+            let(:previous_version) { "1.4.0+10" }
+            let(:version) { "1.4.1+9" }
+            it { is_expected.to include("patch") }
+
+            context "when the tags are for an auto-releasing tool" do
+              let(:labels_fixture_name) { "labels_with_semver_tags_auto.json" }
+              it { is_expected.to_not include("patch") }
+            end
           end
 
           context "for a minor release" do
@@ -600,8 +559,30 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
             it { is_expected.to include("minor") }
           end
 
+          context "for a minor release with build idenfitier" do
+            let(:version) { "1.5.1+1" }
+            it { is_expected.to include("minor") }
+          end
+
+          context "for a minor release when both have build identifiers" do
+            let(:previous_version) { "1.4.0+10" }
+            let(:version) { "1.5.1+1" }
+            it { is_expected.to include("minor") }
+          end
+
           context "for a major release" do
             let(:version) { "2.5.1" }
+            it { is_expected.to include("major") }
+          end
+
+          context "for a major release with build identifier" do
+            let(:version) { "2.5.1+100" }
+            it { is_expected.to include("major") }
+          end
+
+          context "for a major release when both have build identifiers" do
+            let(:previous_version) { "1.4.0+10" }
+            let(:version) { "2.5.1+100" }
             it { is_expected.to include("major") }
           end
 
@@ -649,6 +630,18 @@ RSpec.describe Dependabot::PullRequestCreator::Labeler do
         context "without a previous version" do
           let(:previous_version) { nil }
           it { is_expected.to eq(["dependencies"]) }
+        end
+      end
+
+      context "for an update that fixes a security vulnerability" do
+        let(:includes_security_fixes) { true }
+
+        context "when a default and custom dependencies label exists" do
+          let(:labels_fixture_name) do
+            "labels_with_security_with_custom_and_default.json"
+          end
+
+          it { is_expected.to eq(%w(dependencies security)) }
         end
       end
     end

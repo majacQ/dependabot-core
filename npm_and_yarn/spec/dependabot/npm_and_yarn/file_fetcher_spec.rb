@@ -390,6 +390,78 @@ RSpec.describe Dependabot::NpmAndYarn::FileFetcher do
       end
     end
 
+    context "with a tarball path dependency" do
+      before do
+        stub_request(:get, File.join(url, "package.json?ref=sha")).
+          with(headers: { "Authorization" => "token token" }).
+          to_return(
+            status: 200,
+            body: fixture("github", "package_json_with_tarball_path.json"),
+            headers: json_header
+          )
+        stub_request(:get, "https://api.github.com/repos/gocardless/bump/"\
+                           "contents/deps/etag.tgz?ref=sha").
+          with(headers: { "Authorization" => "token token" }).
+          to_return(
+            status: 403,
+            body: fixture("github", "file_too_large.json"),
+            headers: json_header
+          )
+        stub_request(:get, "https://api.github.com/repos/gocardless/bump/"\
+                            "contents/deps?ref=sha").
+          with(headers: { "Authorization" => "token token" }).
+          to_return(
+            status: 200,
+            body: fixture("github", "contents_js_tarball.json"),
+            headers: json_header
+          )
+        stub_request(:get, "https://api.github.com/repos/gocardless/bump/git/"\
+                           "blobs/2393602fac96cfe31d64f89476014124b4a13b85").
+          with(headers: { "Authorization" => "token token" }).
+          to_return(
+            status: 200,
+            body: fixture("github", "blob_js_tarball.json"),
+            headers: json_header
+          )
+      end
+
+      it "fetches the tarball path dependency" do
+        expect(file_fetcher_instance.files.map(&:name)).to eq(
+          ["package.json", "package-lock.json", "deps/etag.tgz"]
+        )
+      end
+    end
+
+    context "that has an unfetchable tarball path dependency" do
+      before do
+        stub_request(:get, File.join(url, "package.json?ref=sha")).
+          with(headers: { "Authorization" => "token token" }).
+          to_return(
+            status: 200,
+            body: fixture("github", "package_json_with_tarball_path.json"),
+            headers: json_header
+          )
+        stub_request(:get, "https://api.github.com/repos/gocardless/bump/"\
+                            "contents/deps?ref=sha").
+          with(headers: { "Authorization" => "token token" }).
+          to_return(
+            status: 200,
+            body: fixture("github", "contents_js_tarball.json"),
+            headers: json_header
+          )
+        stub_request(:get, "https://api.github.com/repos/gocardless/bump/"\
+                          "contents/deps/etag.tgz?ref=sha").
+          with(headers: { "Authorization" => "token token" }).
+          to_return(status: 404)
+      end
+
+      it "doesn't try to fetch the tarball as a package" do
+        expect(file_fetcher_instance.files.map(&:name)).to eq(
+          ["package.json", "package-lock.json"]
+        )
+      end
+    end
+
     context "that has an unfetchable path" do
       before do
         stub_request(:get, File.join(url, "deps/etag/package.json?ref=sha")).
@@ -433,7 +505,7 @@ RSpec.describe Dependabot::NpmAndYarn::FileFetcher do
                       find { |f| f.name == "deps/etag/package.json" }
           expect(path_file.support_file?).to eq(true)
           expect(path_file.content).
-            to eq("{\"name\":\"etag\",\"version\":\"0.0.1\"}")
+            to eq('{"name":"etag","version":"0.0.1"}')
         end
       end
 
@@ -469,6 +541,100 @@ RSpec.describe Dependabot::NpmAndYarn::FileFetcher do
           path_file = file_fetcher_instance.files.
                       find { |f| f.name == "deps/etag/package.json" }
           expect(path_file.support_file?).to eq(true)
+        end
+      end
+    end
+  end
+
+  context "with a path dependency in a yarn resolution" do
+    before do
+      stub_request(:get, File.join(url, "package.json?ref=sha")).
+        with(headers: { "Authorization" => "token token" }).
+        to_return(
+          status: 200,
+          body: fixture("github",
+                        "package_json_with_yarn_resolution_file_content.json"),
+          headers: json_header
+        )
+    end
+
+    context "that has a fetchable path" do
+      before do
+        file_url = File.join(url, "mocks/sprintf-js/package.json?ref=sha")
+        stub_request(:get, file_url).
+          with(headers: { "Authorization" => "token token" }).
+          to_return(
+            status: 200,
+            body: fixture("github", "package_json_content.json"),
+            headers: json_header
+          )
+      end
+
+      it "fetches package.json from path dependency" do
+        expect(file_fetcher_instance.files.count).to eq(3)
+        expect(file_fetcher_instance.files.map(&:name)).
+          to include("mocks/sprintf-js/package.json")
+        path_file = file_fetcher_instance.files.
+                    find { |f| f.name == "mocks/sprintf-js/package.json" }
+        expect(path_file.support_file?).to eq(true)
+      end
+    end
+
+    context "that has an unfetchable path" do
+      before do
+        file_url = File.join(url, "mocks/sprintf-js/package.json?ref=sha")
+        stub_request(:get, file_url).
+          with(headers: { "Authorization" => "token token" }).
+          to_return(status: 404)
+        stub_request(:get, File.join(url, "mocks/sprintf-js?ref=sha")).
+          with(headers: { "Authorization" => "token token" }).
+          to_return(status: 404)
+        stub_request(:get, File.join(url, "mocks?ref=sha")).
+          with(headers: { "Authorization" => "token token" }).
+          to_return(status: 404)
+      end
+
+      context "when the path dep doesn't appear in the lockfile" do
+        it "raises a PathDependenciesNotReachable error with details" do
+          expect { file_fetcher_instance.files }.
+            to raise_error(
+              Dependabot::PathDependenciesNotReachable,
+              "The following path based dependencies could not be retrieved: " \
+              "sprintf-js"
+            )
+        end
+      end
+
+      context "when the path dep does appear in the lockfile" do
+        before do
+          stub_request(:get, url + "?ref=sha").
+            with(headers: { "Authorization" => "token token" }).
+            to_return(
+              status: 200,
+              body: fixture("github", "contents_js_yarn.json"),
+              headers: json_header
+            )
+          stub_request(:get, File.join(url, "package-lock.json?ref=sha")).
+            with(headers: { "Authorization" => "token token" }).
+            to_return(status: 404)
+          stub_request(:get, File.join(url, "yarn.lock?ref=sha")).
+            with(headers: { "Authorization" => "token token" }).
+            to_return(
+              status: 200,
+              body: fixture("github", "yarn_lock_with_path_content.json"),
+              headers: json_header
+            )
+        end
+
+        it "builds an imitation path dependency" do
+          expect(file_fetcher_instance.files.map(&:name)).to match_array(
+            %w(package.json yarn.lock mocks/sprintf-js/package.json)
+          )
+          path_file = file_fetcher_instance.files.
+                      find { |f| f.name == "mocks/sprintf-js/package.json" }
+          expect(path_file.support_file?).to eq(true)
+          expect(path_file.content).
+            to eq('{"name":"sprintf-js","version":"0.0.0"}')
         end
       end
     end

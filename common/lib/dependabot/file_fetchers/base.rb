@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
+require "dependabot/config"
 require "dependabot/dependency_file"
 require "dependabot/source"
 require "dependabot/errors"
+require "dependabot/clients/azure"
+require "dependabot/clients/codecommit"
 require "dependabot/clients/github_with_retries"
 require "dependabot/clients/bitbucket_with_retries"
 require "dependabot/clients/gitlab_with_retries"
@@ -12,12 +15,14 @@ require "dependabot/shared_helpers"
 module Dependabot
   module FileFetchers
     class Base
-      attr_reader :source, :credentials
+      attr_reader :source, :credentials, :repo_contents_path
 
       CLIENT_NOT_FOUND_ERRORS = [
         Octokit::NotFound,
         Gitlab::Error::NotFound,
-        Dependabot::Clients::Bitbucket::NotFound
+        Dependabot::Clients::Azure::NotFound,
+        Dependabot::Clients::Bitbucket::NotFound,
+        Dependabot::Clients::CodeCommit::NotFound
       ].freeze
 
       def self.required_files_in?(_filename_array)
@@ -28,10 +33,19 @@ module Dependabot
         raise NotImplementedError
       end
 
-      def initialize(source:, credentials:)
+      # Creates a new FileFetcher for retrieving `DependencyFile`s.
+      #
+      # Files are typically grabbed individually via the source's API.
+      # repo_contents_path is an optional empty directory that will be used
+      # to clone the entire source repository on first read.
+      #
+      # If provided, file _data_ will be loaded from the clone.
+      # Submodules and directory listings are _not_ currently supported
+      # by repo_contents_path and still use an API trip.
+      def initialize(source:, credentials:, repo_contents_path: nil)
         @source = source
         @credentials = credentials
-
+        @repo_contents_path = repo_contents_path
         @linked_paths = {}
       end
 
@@ -51,8 +65,9 @@ module Dependabot
         @files ||= fetch_files
       end
 
-      # rubocop:disable Naming/RescuedExceptionsVariableName
       def commit
+        return source.commit if source.commit
+
         branch = target_branch || default_branch_for_repo
 
         @commit ||= client_for_provider.fetch_commit(repo, branch)
@@ -61,12 +76,26 @@ module Dependabot
       rescue Octokit::Conflict => e
         raise unless e.message.include?("Repository is empty")
       end
-      # rubocop:enable Naming/RescuedExceptionsVariableName
+
+      # Returns the path to the cloned repo
+      def clone_repo_contents
+        @clone_repo_contents ||=
+          _clone_repo_contents(target_directory: repo_contents_path)
+      rescue Dependabot::SharedHelpers::HelperSubprocessFailed
+        raise Dependabot::RepoNotFound, source
+      end
 
       private
 
-      # rubocop:disable Naming/RescuedExceptionsVariableName
       def fetch_file_if_present(filename, fetch_submodules: false)
+        unless repo_contents_path.nil?
+          begin
+            return load_cloned_file_if_present(filename)
+          rescue Dependabot::DependencyFileNotFound
+            return
+          end
+        end
+
         dir = File.dirname(filename)
         basename = File.basename(filename)
 
@@ -81,22 +110,46 @@ module Dependabot
         path = Pathname.new(File.join(directory, filename)).cleanpath.to_path
         raise Dependabot::DependencyFileNotFound, path
       end
-      # rubocop:enable Naming/RescuedExceptionsVariableName
 
-      # rubocop:disable Naming/RescuedExceptionsVariableName
-      def fetch_file_from_host(filename, type: "file", fetch_submodules: false)
+      def load_cloned_file_if_present(filename)
         path = Pathname.new(File.join(directory, filename)).cleanpath.to_path
+        repo_path = File.join(clone_repo_contents, path)
+        raise Dependabot::DependencyFileNotFound, path unless File.exist?(repo_path)
+
+        content = File.read(repo_path)
+        type = if File.symlink?(repo_path)
+                 symlink_target = File.readlink(repo_path)
+                 "symlink"
+               else
+                 "file"
+               end
 
         DependencyFile.new(
           name: Pathname.new(filename).cleanpath.to_path,
           directory: directory,
           type: type,
-          content: _fetch_file_content(path, fetch_submodules: fetch_submodules)
+          content: content,
+          symlink_target: symlink_target
+        )
+      end
+
+      def fetch_file_from_host(filename, type: "file", fetch_submodules: false)
+        return load_cloned_file_if_present(filename) unless repo_contents_path.nil?
+
+        path = Pathname.new(File.join(directory, filename)).cleanpath.to_path
+        content = _fetch_file_content(path, fetch_submodules: fetch_submodules)
+        type = @linked_paths.key?(path.gsub(%r{^/}, "")) ? "symlink" : type
+
+        DependencyFile.new(
+          name: Pathname.new(filename).cleanpath.to_path,
+          directory: directory,
+          type: type,
+          content: content,
+          symlink_target: @linked_paths.dig(path.gsub(%r{^/}, ""), :path)
         )
       rescue *CLIENT_NOT_FOUND_ERRORS
         raise Dependabot::DependencyFileNotFound, path
       end
-      # rubocop:enable Naming/RescuedExceptionsVariableName
 
       def repo_contents(dir: ".", ignore_base_directory: false,
                         raise_errors: true, fetch_submodules: false)
@@ -115,7 +168,6 @@ module Dependabot
       # INTERNAL METHODS (not for use by sub-classes) #
       #################################################
 
-      # rubocop:disable Naming/RescuedExceptionsVariableName
       def _fetch_repo_contents(path, fetch_submodules: false,
                                raise_errors: true)
         path = path.gsub(" ", "%20")
@@ -144,7 +196,6 @@ module Dependabot
         retrying = true
         retry
       end
-      # rubocop:enable Naming/RescuedExceptionsVariableName
 
       def _fetch_repo_contents_fully_specified(provider, repo, path, commit)
         case provider
@@ -152,8 +203,12 @@ module Dependabot
           _github_repo_contents(repo, path, commit)
         when "gitlab"
           _gitlab_repo_contents(repo, path, commit)
+        when "azure"
+          _azure_repo_contents(path, commit)
         when "bitbucket"
           _bitbucket_repo_contents(repo, path, commit)
+        when "codecommit"
+          _codecommit_repo_contents(repo, path, commit)
         else raise "Unsupported provider '#{provider}'."
         end
       end
@@ -207,9 +262,11 @@ module Dependabot
         gitlab_client.
           repo_tree(repo, path: path, ref_name: commit, per_page: 100).
           map do |file|
+            # GitLab API essentially returns the output from `git ls-tree`
             type = case file.type
                    when "blob" then "file"
                    when "tree" then "dir"
+                   when "commit" then "submodule"
                    else file.fetch("type")
                    end
 
@@ -220,6 +277,25 @@ module Dependabot
               size: 0 # GitLab doesn't return file size
             )
           end
+      end
+
+      def _azure_repo_contents(path, commit)
+        response = azure_client.fetch_repo_contents(commit, path)
+
+        response.map do |entry|
+          type = case entry.fetch("gitObjectType")
+                 when "blob" then "file"
+                 when "tree" then "dir"
+                 else entry.fetch("gitObjectType")
+                 end
+
+          OpenStruct.new(
+            name: File.basename(entry.fetch("relativePath")),
+            path: entry.fetch("relativePath"),
+            type: type,
+            size: entry.fetch("size")
+          )
+        end
       end
 
       def _bitbucket_repo_contents(repo, path, commit)
@@ -241,6 +317,23 @@ module Dependabot
             path: file.fetch("path"),
             type: type,
             size: file.fetch("size", 0)
+          )
+        end
+      end
+
+      def _codecommit_repo_contents(repo, path, commit)
+        response = codecommit_client.fetch_repo_contents(
+          repo,
+          commit,
+          path
+        )
+
+        response.files.map do |file|
+          OpenStruct.new(
+            name: file.absolute_path,
+            path: file.absolute_path,
+            type: "file",
+            size: 0 # file size would require new api call per file..
           )
         end
       end
@@ -270,7 +363,6 @@ module Dependabot
         end
       end
 
-      # rubocop:disable Naming/RescuedExceptionsVariableName
       def _fetch_file_content(path, fetch_submodules: false)
         path = path.gsub(%r{^/*}, "")
 
@@ -290,7 +382,6 @@ module Dependabot
         retrying = true
         retry
       end
-      # rubocop:enable Naming/RescuedExceptionsVariableName
 
       def _fetch_file_content_fully_specified(provider, repo, path, commit)
         case provider
@@ -299,8 +390,12 @@ module Dependabot
         when "gitlab"
           tmp = gitlab_client.get_file(repo, path, commit).content
           Base64.decode64(tmp).force_encoding("UTF-8").encode
+        when "azure"
+          azure_client.fetch_file_contents(commit, path)
         when "bitbucket"
           bitbucket_client.fetch_file_contents(repo, commit, path)
+        when "codecommit"
+          codecommit_client.fetch_file_contents(repo, commit, path)
         else raise "Unsupported provider '#{source.provider}'."
         end
       end
@@ -312,9 +407,15 @@ module Dependabot
         raise Octokit::NotFound if tmp.is_a?(Array)
 
         if tmp.type == "symlink"
+          @linked_paths[path] = {
+            repo: repo,
+            provider: "github",
+            commit: commit,
+            path: Pathname.new(tmp.target).cleanpath.to_path
+          }
           tmp = github_client.contents(
             repo,
-            path: tmp.target,
+            path: Pathname.new(tmp.target).cleanpath.to_path,
             ref: commit
           )
         end
@@ -337,14 +438,12 @@ module Dependabot
       end
       # rubocop:enable Metrics/AbcSize
 
-      # rubocop:disable Naming/RescuedExceptionsVariableName
       def default_branch_for_repo
         @default_branch_for_repo ||= client_for_provider.
                                      fetch_default_branch(repo)
       rescue *CLIENT_NOT_FOUND_ERRORS
         raise Dependabot::RepoNotFound, source
       end
-      # rubocop:enable Naming/RescuedExceptionsVariableName
 
       # Update the @linked_paths hash by exploiting a side-effect of
       # recursively calling `repo_contents` for each directory up the tree
@@ -370,11 +469,31 @@ module Dependabot
           max_by(&:length)
       end
 
+      def _clone_repo_contents(target_directory:)
+        SharedHelpers.with_git_configured(credentials: credentials) do
+          path = target_directory || File.join("tmp", source.repo)
+          # Assume we're retrying the same branch, or that a `target_directory`
+          # is specified when retrying a different branch.
+          return path if Dir.exist?(File.join(path, ".git"))
+
+          FileUtils.mkdir_p(path)
+          br_opt = " --branch #{source.branch} --single-branch" if source.branch
+          SharedHelpers.run_shell_command(
+            <<~CMD
+              git clone --no-tags --no-recurse-submodules --depth 1#{br_opt} #{source.url} #{path}
+            CMD
+          )
+          path
+        end
+      end
+
       def client_for_provider
         case source.provider
         when "github" then github_client
         when "gitlab" then gitlab_client
+        when "azure" then azure_client
         when "bitbucket" then bitbucket_client
+        when "codecommit" then codecommit_client
         else raise "Unsupported provider '#{source.provider}'."
         end
       end
@@ -395,12 +514,24 @@ module Dependabot
           )
       end
 
+      def azure_client
+        @azure_client ||=
+          Dependabot::Clients::Azure.
+          for_source(source: source, credentials: credentials)
+      end
+
       def bitbucket_client
         # TODO: When self-hosted Bitbucket is supported this should use
         # `Bitbucket.for_source`
         @bitbucket_client ||=
           Dependabot::Clients::BitbucketWithRetries.
           for_bitbucket_dot_org(credentials: credentials)
+      end
+
+      def codecommit_client
+        @codecommit_client ||=
+          Dependabot::Clients::CodeCommit.
+          for_source(source: source, credentials: credentials)
       end
     end
   end

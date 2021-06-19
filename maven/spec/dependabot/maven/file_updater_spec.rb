@@ -48,6 +48,27 @@ RSpec.describe Dependabot::Maven::FileUpdater do
       package_manager: "maven"
     )
   end
+  let(:mockk_dependency) do
+    Dependabot::Dependency.new(
+      name: "io.mockk:mockk:sources",
+      version: "1.10.0",
+      requirements: [{
+        file: "pom.xml",
+        requirement: "1.10.0",
+        groups: [],
+        source: nil,
+        metadata: { packaging_type: "jar" }
+      }],
+      previous_requirements: [{
+        file: "pom.xml",
+        requirement: "1.0.0",
+        groups: [],
+        source: nil,
+        metadata: { packaging_type: "jar" }
+      }],
+      package_manager: "maven"
+    )
+  end
   let(:dependency_groups) { ["test"] }
 
   describe "#updated_dependency_files" do
@@ -70,6 +91,11 @@ RSpec.describe Dependabot::Maven::FileUpdater do
       it "doesn't update the formatting of the POM" do
         expect(updated_pom_file.content).
           to include(%(<project xmlns="http://maven.apache.org/POM/4.0.0"\n))
+      end
+
+      context "handles dependencies with classifiers" do
+        let(:dependencies) { [dependency, mockk_dependency] }
+        its(:content) { is_expected.to include("<version>1.10.0</version>") }
       end
 
       context "with rogue whitespace" do
@@ -419,6 +445,48 @@ RSpec.describe Dependabot::Maven::FileUpdater do
         it "doesn't update the formatting of the POM" do
           expect(updated_pom_file.content).
             to include(%(<project xmlns="http://maven.apache.org/POM/4.0.0"\n))
+        end
+
+        context "with an attribute" do
+          let(:pom_body) do
+            fixture("poms", "property_pom_single_attribute.xml")
+          end
+          let(:dependencies) do
+            [
+              Dependabot::Dependency.new(
+                name: "org.springframework:spring-beans",
+                version: "5.0.0.RELEASE",
+                requirements: [{
+                  file: "pom.xml",
+                  requirement: "5.0.0.RELEASE",
+                  groups: [],
+                  source: nil,
+                  metadata: {
+                    property_name: "springframework.version",
+                    packaging_type: "jar"
+                  }
+                }],
+                previous_requirements: [{
+                  file: "pom.xml",
+                  requirement: "4.3.12.RELEASE.1",
+                  groups: [],
+                  source: nil,
+                  metadata: {
+                    property_name: "springframework.version",
+                    packaging_type: "jar"
+                  }
+                }],
+                package_manager: "maven"
+              )
+            ]
+          end
+
+          it "updates the version in the POM" do
+            expect(updated_pom_file.content).
+              to include("<springframework.version attribute=\"value\">5.0.0.")
+            expect(updated_pom_file.content).
+              to include("<version>${springframework.version}</version>")
+          end
         end
 
         context "with a suffix" do

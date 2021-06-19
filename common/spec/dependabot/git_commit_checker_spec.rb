@@ -9,7 +9,8 @@ RSpec.describe Dependabot::GitCommitChecker do
     described_class.new(
       dependency: dependency,
       credentials: credentials,
-      ignored_versions: ignored_versions
+      ignored_versions: ignored_versions,
+      raise_on_ignored: raise_on_ignored
     )
   end
 
@@ -22,6 +23,7 @@ RSpec.describe Dependabot::GitCommitChecker do
     )
   end
   let(:ignored_versions) { [] }
+  let(:raise_on_ignored) { false }
 
   let(:requirements) do
     [{ file: "Gemfile", requirement: ">= 0", groups: [], source: source }]
@@ -53,6 +55,27 @@ RSpec.describe Dependabot::GitCommitChecker do
 
     context "with a non-git dependency" do
       let(:source) { nil }
+      it { is_expected.to eq(false) }
+    end
+
+    context "with a non-git dependency that has multiple sources" do
+      let(:requirements) do
+        [
+          {
+            file: "package.json",
+            requirement: "0.1.0",
+            groups: ["dependencies"],
+            source: { type: "registry", url: "https://registry.npmjs.org" }
+          },
+          {
+            file: "package.json",
+            requirement: "0.1.0",
+            groups: ["devDependencies"],
+            source: { type: "registry", url: "https://registry.yarnpkg.com" }
+          }
+        ]
+      end
+
       it { is_expected.to eq(false) }
     end
 
@@ -105,7 +128,7 @@ RSpec.describe Dependabot::GitCommitChecker do
         end
 
         context "with multiple source types" do
-          let(:s2) { { type: "path" } }
+          let(:s2) { { type: "git", url: "https://github.com/dependabot/dependabot-core" } }
 
           it "raises a helpful error" do
             expect { checker.git_dependency? }.
@@ -473,6 +496,40 @@ RSpec.describe Dependabot::GitCommitChecker do
         }
       end
       it { is_expected.to eq(dependency.version) }
+
+      context "without a version" do
+        let(:version) { nil }
+
+        let(:git_header) do
+          { "content-type" => "application/x-git-upload-pack-advertisement" }
+        end
+        let(:auth_header) { "Basic eC1hY2Nlc3MtdG9rZW46dG9rZW4=" }
+
+        let(:git_url) do
+          "https://github.com/gocardless/business.git" \
+          "/info/refs?service=git-upload-pack"
+        end
+
+        context "that can be reached just fine" do
+          before do
+            stub_request(:get, git_url).
+              with(headers: { "Authorization" => auth_header }).
+              to_return(
+                status: 200,
+                body: fixture("git", "upload_packs", "business"),
+                headers: git_header
+              )
+          end
+
+          it { is_expected.to eq("df9f605d7111b6814fe493cf8f41de3f9f0978b2") }
+
+          context "but doesn't have details of the current branch" do
+            before { source.merge!(ref: "rando") }
+
+            it { is_expected.to be_nil }
+          end
+        end
+      end
     end
 
     context "with a non-pinned dependency" do
@@ -687,6 +744,18 @@ RSpec.describe Dependabot::GitCommitChecker do
         end
         it { is_expected.to eq(true) }
       end
+
+      context "that is just v1" do
+        let(:source) do
+          {
+            type: "git",
+            url: "https://github.com/gocardless/business",
+            branch: "master",
+            ref: "v1"
+          }
+        end
+        it { is_expected.to eq(true) }
+      end
     end
 
     context "with a non-version pin" do
@@ -699,6 +768,86 @@ RSpec.describe Dependabot::GitCommitChecker do
         }
       end
       it { is_expected.to eq(false) }
+    end
+
+    context "with no ref" do
+      let(:source) do
+        {
+          type: "git",
+          url: "https://github.com/gocardless/business",
+          branch: "master",
+          ref: nil
+        }
+      end
+      it { is_expected.to eq(false) }
+    end
+  end
+
+  describe "#pinned_ref_looks_like_commit_sha?" do
+    subject { checker.pinned_ref_looks_like_commit_sha? }
+
+    context "with a non-pinned dependency" do
+      let(:source) do
+        {
+          type: "git",
+          url: "https://github.com/gocardless/business",
+          branch: "master",
+          ref: "master"
+        }
+      end
+      it { is_expected.to eq(false) }
+    end
+
+    context "with a version pin" do
+      let(:source) do
+        {
+          type: "git",
+          url: "https://github.com/gocardless/business",
+          branch: "master",
+          ref: "v1.0.0"
+        }
+      end
+      it { is_expected.to eq(false) }
+    end
+
+    context "with a git commit pin" do
+      let(:source) do
+        {
+          type: "git",
+          url: "https://github.com/gocardless/business",
+          branch: "master",
+          ref: "1a21311"
+        }
+      end
+
+      let(:repo_url) { "https://github.com/gocardless/business.git" }
+      let(:service_pack_url) { repo_url + "/info/refs?service=git-upload-pack" }
+      before do
+        stub_request(:get, service_pack_url).
+          to_return(
+            status: 200,
+            body: fixture("git", "upload_packs", upload_pack_fixture),
+            headers: {
+              "content-type" => "application/x-git-upload-pack-advertisement"
+            }
+          )
+      end
+      let(:upload_pack_fixture) { "monolog" }
+
+      it { is_expected.to eq(true) }
+
+      context "that matches a tag" do
+        let(:source) do
+          {
+            type: "git",
+            url: "https://github.com/gocardless/business",
+            branch: "master",
+            ref: "aaaaaaaa"
+          }
+        end
+
+        it { is_expected.to eq(false) }
+      end
     end
 
     context "with no ref" do
@@ -792,9 +941,60 @@ RSpec.describe Dependabot::GitCommitChecker do
           its([:tag]) { is_expected.to eq("gatsby-transformer-sqip@2.0.40") }
         end
 
+        context "raise_on_ignored when later versions are allowed" do
+          let(:raise_on_ignored) { true }
+          it "doesn't raise an error" do
+            expect { subject }.to_not raise_error
+          end
+        end
+
+        context "already on the latest version" do
+          let(:version) { "1.13.0" }
+          its([:tag]) { is_expected.to eq("v1.13.0") }
+
+          context "raise_on_ignored" do
+            let(:raise_on_ignored) { true }
+            it "doesn't raise an error" do
+              expect { subject }.to_not raise_error
+            end
+          end
+        end
+
+        context "all later versions ignored" do
+          let(:version) { "1.0.0" }
+          let(:ignored_versions) { ["> 1.0.0"] }
+          its([:tag]) { is_expected.to eq("v1.0.0") }
+
+          context "raise_on_ignored" do
+            let(:raise_on_ignored) { true }
+            it "raises an error" do
+              expect { subject }.to raise_error(Dependabot::AllVersionsIgnored)
+            end
+          end
+        end
+
         context "and an ignore condition" do
           let(:ignored_versions) { [">= 1.12.0"] }
           its([:tag]) { is_expected.to eq("v1.11.1") }
+        end
+
+        context "multiple ignore conditions" do
+          let(:ignored_versions) { [">= 1.11.2, < 1.12.0"] }
+          its([:tag]) { is_expected.to eq("v1.13.0") }
+        end
+
+        context "all versions ignored" do
+          let(:ignored_versions) { [">= 0"] }
+          it "returns nil" do
+            expect(subject).to be_nil
+          end
+
+          context "raise_on_ignored" do
+            let(:raise_on_ignored) { true }
+            it "raises an error" do
+              expect { subject }.to raise_error(Dependabot::AllVersionsIgnored)
+            end
+          end
         end
 
         context "and a ref prefixed with tags/" do
@@ -809,6 +1009,65 @@ RSpec.describe Dependabot::GitCommitChecker do
 
           its([:tag]) { is_expected.to eq("tags/v1.13.0") }
         end
+      end
+    end
+  end
+
+  describe "#local_tag_for_pinned_version" do
+    subject { checker.local_tag_for_pinned_version }
+
+    context "with a git commit pin" do
+      let(:source) do
+        {
+          type: "git",
+          url: "https://github.com/actions/checkout",
+          branch: "main",
+          ref: source_commit
+        }
+      end
+
+      let(:repo_url) { "https://github.com/actions/checkout.git" }
+      let(:service_pack_url) { repo_url + "/info/refs?service=git-upload-pack" }
+      before do
+        stub_request(:get, service_pack_url).
+          to_return(
+            status: 200,
+            body: fixture("git", "upload_packs", upload_pack_fixture),
+            headers: {
+              "content-type" => "application/x-git-upload-pack-advertisement"
+            }
+          )
+      end
+      let(:upload_pack_fixture) { "actions-checkout" }
+
+      context "that is a tag" do
+        let(:source_commit) { "a81bbbf8298c0fa03ea29cdc473d45769f953675" }
+
+        it { is_expected.to eq("v2.3.3") }
+      end
+
+      context "that is not a tag" do
+        let(:source_commit) { "25a956c84d5dd820d28caab9f86b8d183aeeff3d" }
+
+        it { is_expected.to be_nil }
+      end
+
+      context "that is an invalid tag" do
+        let(:source_commit) { "18217bbd6de24e775799c3d99058f167ad168624" }
+
+        it { is_expected.to be_nil }
+      end
+
+      context "that is not found" do
+        let(:source_commit) { "f0987d27b23cb3fd0e97eb7908c1a27df5bf8329" }
+
+        it { is_expected.to be_nil }
+      end
+
+      context "that is multiple tags" do
+        let(:source_commit) { "5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f" }
+
+        it { is_expected.to eq("v2.3.4") }
       end
     end
   end

@@ -89,7 +89,12 @@ module Dependabot
           end
 
           # No editing required for lockfile or Ruby version file
-          files += [lockfile, ruby_version_file, *imported_ruby_files].compact
+          files += [
+            lockfile,
+            ruby_version_file,
+            *imported_ruby_files,
+            *specification_files
+          ].compact
         end
         # rubocop:enable Metrics/AbcSize
         # rubocop:enable Metrics/MethodLength
@@ -119,6 +124,7 @@ module Dependabot
         def evaled_gemfiles
           dependency_files.
             reject { |f| f.name.end_with?(".gemspec") }.
+            reject { |f| f.name.end_with?(".specification") }.
             reject { |f| f.name.end_with?(".lock") }.
             reject { |f| f.name.end_with?(".ruby-version") }.
             reject { |f| f.name == "Gemfile" }.
@@ -129,6 +135,10 @@ module Dependabot
         def lockfile
           dependency_files.find { |f| f.name == "Gemfile.lock" } ||
             dependency_files.find { |f| f.name == "gems.locked" }
+        end
+
+        def specification_files
+          dependency_files.select { |f| f.name.end_with?(".specification") }
         end
 
         def top_level_gemspecs
@@ -197,13 +207,12 @@ module Dependabot
           lower_bound_req = updated_version_req_lower_bound(filename)
 
           return lower_bound_req if latest_allowable_version.nil?
-          unless Gem::Version.correct?(latest_allowable_version)
-            return lower_bound_req
-          end
+          return lower_bound_req unless Gem::Version.correct?(latest_allowable_version)
 
           lower_bound_req + ", <= #{latest_allowable_version}"
         end
 
+        # rubocop:disable Metrics/PerceivedComplexity
         def updated_version_req_lower_bound(filename)
           original_req = dependency.requirements.
                          find { |r| r.fetch(:file) == filename }&.
@@ -224,6 +233,7 @@ module Dependabot
             ">= #{version_for_requirement || 0}"
           end
         end
+        # rubocop:enable Metrics/PerceivedComplexity
 
         def remove_git_source(content)
           FileUpdater::GitSourceRemover.new(
@@ -251,6 +261,7 @@ module Dependabot
           @lock_ruby_version && file == gemfile
         end
 
+        # rubocop:disable Metrics/PerceivedComplexity
         def replacement_version_for_gemspec(gemspec_content)
           return "0.0.1" unless lockfile
 
@@ -268,7 +279,9 @@ module Dependabot
           spec = gemspec_specs.find { |s| s.name == gem_name }
           spec&.version || gemspec_specs.first&.version || "0.0.1"
         end
+        # rubocop:enable Metrics/PerceivedComplexity
 
+        # TODO: Stop sanitizing the lockfile once we have bundler 2 installed
         def sanitized_lockfile_content
           re = FileUpdater::LockfileUpdater::LOCKFILE_ENDING
           lockfile.content.gsub(re, "")

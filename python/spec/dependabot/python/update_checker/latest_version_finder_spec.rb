@@ -7,16 +7,19 @@ require "dependabot/python/update_checker/latest_version_finder"
 
 RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
   before do
-    stub_request(:get, pypi_url).to_return(status: 200, body: pypi_response)
+    stub_request(:get, pypi_url).
+      with(headers: { "Accept" => "text/html" }).
+      to_return(status: 200, body: pypi_response)
   end
-  let(:pypi_url) { "https://pypi.python.org/simple/luigi/" }
-  let(:pypi_response) { fixture("pypi_simple_response.html") }
+  let(:pypi_url) { "https://pypi.org/simple/luigi/" }
+  let(:pypi_response) { fixture("pypi", "pypi_simple_response.html") }
   let(:finder) do
     described_class.new(
       dependency: dependency,
       dependency_files: dependency_files,
       credentials: credentials,
       ignored_versions: ignored_versions,
+      raise_on_ignored: raise_on_ignored,
       security_advisories: security_advisories
     )
   end
@@ -29,6 +32,7 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
     }]
   end
   let(:ignored_versions) { [] }
+  let(:raise_on_ignored) { false }
   let(:security_advisories) { [] }
   let(:dependency_files) { [requirements_file] }
   let(:pipfile) do
@@ -76,7 +80,7 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
     it { is_expected.to eq(Gem::Version.new("2.6.0")) }
 
     context "when the pypi link resolves to a redirect" do
-      let(:redirect_url) { "https://pypi.python.org/LuiGi/json" }
+      let(:redirect_url) { "https://pypi.org/LuiGi/json" }
 
       before do
         stub_request(:get, pypi_url).
@@ -104,26 +108,76 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
     end
 
     context "when the PyPI response includes zipped files" do
+      let(:pypi_response) { fixture("pypi", "pypi_simple_response_zip.html") }
+      it { is_expected.to eq(Gem::Version.new("2.6.0")) }
+    end
+
+    context "when the pypi link responds with devpi-style" do
+      let(:pypi_response) { fixture("pypi", "pypi_simple_response_devpi.html") }
+      let(:dependency_version) { "0.9.0" }
+
+      it { is_expected.to eq(Gem::Version.new("0.10.2")) }
+    end
+
+    context "when the latest versions have been yanked" do
       let(:pypi_response) do
-        fixture("pypi_simple_response_zip.html")
+        fixture("pypi", "pypi_simple_response_yanked.html")
+      end
+      it { is_expected.to eq(Gem::Version.new("2.4.0")) }
+    end
+
+    context "when the PyPI response includes multi-line links" do
+      let(:pypi_response) do
+        fixture("pypi", "pypi_simple_response_multiline.html")
       end
       it { is_expected.to eq(Gem::Version.new("2.6.0")) }
     end
 
+    context "when the PyPI response includes data-requires-python entries" do
+      let(:pypi_response) do
+        fixture("pypi", "pypi_simple_response_django.html")
+      end
+      let(:pypi_url) { "https://pypi.org/simple/django/" }
+      let(:dependency_name) { "django" }
+      let(:dependency_version) { "1.2.4" }
+
+      it { is_expected.to eq(Gem::Version.new("3.2.4")) }
+
+      context "and a python version specified" do
+        subject { finder.latest_version(python_version: python_version) }
+
+        context "that allows the latest version" do
+          let(:python_version) { Dependabot::Python::Version.new("3.6.3") }
+          it { is_expected.to eq(Gem::Version.new("3.2.4")) }
+        end
+
+        context "that forbids the latest version" do
+          let(:python_version) { Dependabot::Python::Version.new("2.7.11") }
+          it { is_expected.to eq(Gem::Version.new("1.11.29")) }
+        end
+      end
+    end
+
     context "when the dependency name isn't normalised" do
       let(:dependency_name) { "Luigi_ext" }
-      let(:pypi_url) { "https://pypi.python.org/simple/luigi-ext/" }
+      let(:pypi_url) { "https://pypi.org/simple/luigi-ext/" }
       let(:pypi_response) do
-        fixture("pypi_simple_response_underscore.html")
+        fixture("pypi", "pypi_simple_response_underscore.html")
       end
       it { is_expected.to eq(Gem::Version.new("2.6.0")) }
 
       context "and contains spaces" do
         let(:pypi_response) do
-          fixture("pypi_simple_response_space.html")
+          fixture("pypi", "pypi_simple_response_space.html")
         end
         it { is_expected.to eq(Gem::Version.new("2.6.0")) }
       end
+    end
+
+    context "when the dependency name includes extras" do
+      let(:dependency_name) { "luigi[toml]" }
+
+      it { is_expected.to eq(Gem::Version.new("2.6.0")) }
     end
 
     context "when the user's current version is a pre-release" do
@@ -137,6 +191,48 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
         }]
       end
       it { is_expected.to eq(Gem::Version.new("2.7.0b1")) }
+    end
+
+    context "raise_on_ignored when later versions are allowed" do
+      let(:raise_on_ignored) { true }
+      it "doesn't raise an error" do
+        expect { subject }.to_not raise_error
+      end
+    end
+
+    context "when the user is on the latest version" do
+      let(:dependency_version) { "2.6.0" }
+      it { is_expected.to eq(Gem::Version.new("2.6.0")) }
+
+      context "raise_on_ignored" do
+        let(:raise_on_ignored) { true }
+        it "doesn't raise an error" do
+          expect { subject }.to_not raise_error
+        end
+      end
+    end
+
+    context "when the dependency version isn't known" do
+      let(:dependency_version) { nil }
+
+      context "raise_on_ignored" do
+        let(:raise_on_ignored) { true }
+        it "doesn't raise an error" do
+          expect { subject }.to_not raise_error
+        end
+      end
+    end
+
+    context "when the user is ignoring all later versions" do
+      let(:ignored_versions) { ["> 2.0.0"] }
+      it { is_expected.to eq(Gem::Version.new("2.0.0")) }
+
+      context "raise_on_ignored" do
+        let(:raise_on_ignored) { true }
+        it "raises an error" do
+          expect { subject }.to raise_error(Dependabot::AllVersionsIgnored)
+        end
+      end
     end
 
     context "when the user is ignoring the latest version" do
@@ -209,7 +305,7 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
 
         context "that is unparseable" do
           let(:pipfile_fixture_name) { "unparseable" }
-          let(:pypi_url) { "https://pypi.python.org/simple/luigi/" }
+          let(:pypi_url) { "https://pypi.org/simple/luigi/" }
           it { is_expected.to eq(Gem::Version.new("2.6.0")) }
         end
 
@@ -285,7 +381,7 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
         "https://pypi.weasyldev.com/weasyl/source/+simple/luigi/"
       end
       let(:extra_response) do
-        fixture("pypi_simple_response_extra.html")
+        fixture("pypi", "pypi_simple_response_extra.html")
       end
       before do
         stub_request(:get, extra_url).
@@ -414,10 +510,10 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
   end
 
   describe "#latest_version_with_no_unlock" do
-    subject { finder.send(:latest_version_with_no_unlock) }
+    subject { finder.latest_version_with_no_unlock }
     let(:dependency) do
       Dependabot::Dependency.new(
-        name: "luigi",
+        name: dependency_name,
         version: version,
         requirements: requirements,
         package_manager: "pip"
@@ -435,6 +531,40 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
       context "when the user is ignoring the latest version" do
         let(:ignored_versions) { [">= 2.0.0.a, < 3.0"] }
         it { is_expected.to eq(Gem::Version.new("1.3.0")) }
+      end
+
+      context "when the latest versions have been yanked" do
+        let(:pypi_response) do
+          fixture("pypi", "pypi_simple_response_yanked.html")
+        end
+        it { is_expected.to eq(Gem::Version.new("2.4.0")) }
+      end
+
+      context "when the PyPI response includes data-requires-python entries" do
+        let(:pypi_response) do
+          fixture("pypi", "pypi_simple_response_django.html")
+        end
+        let(:pypi_url) { "https://pypi.org/simple/django/" }
+        let(:dependency_name) { "django" }
+        let(:dependency_version) { "1.2.4" }
+
+        it { is_expected.to eq(Gem::Version.new("3.2.4")) }
+
+        context "and a python version specified" do
+          subject do
+            finder.latest_version_with_no_unlock(python_version: python_version)
+          end
+
+          context "that allows the latest version" do
+            let(:python_version) { Dependabot::Python::Version.new("3.6.3") }
+            it { is_expected.to eq(Gem::Version.new("3.2.4")) }
+          end
+
+          context "that forbids the latest version" do
+            let(:python_version) { Dependabot::Python::Version.new("2.7.11") }
+            it { is_expected.to eq(Gem::Version.new("1.11.29")) }
+          end
+        end
       end
     end
 
@@ -490,5 +620,53 @@ RSpec.describe Dependabot::Python::UpdateChecker::LatestVersionFinder do
       ]
     end
     it { is_expected.to eq(Gem::Version.new("2.1.1")) }
+
+    context "when the lowest version has been yanked" do
+      let(:pypi_response) do
+        fixture("pypi", "pypi_simple_response_yanked.html")
+      end
+      it { is_expected.to eq(Gem::Version.new("2.2.0")) }
+    end
+
+    context "when the user has ignored all versions" do
+      let(:ignored_versions) { ["> 0"] }
+      it "returns nil" do
+        expect(subject).to be_nil
+      end
+
+      context "raise_on_ignored" do
+        let(:raise_on_ignored) { true }
+        it "raises an error" do
+          expect { subject }.to raise_error(Dependabot::AllVersionsIgnored)
+        end
+      end
+    end
+
+    context "when the PyPI response includes data-requires-python entries" do
+      let(:pypi_response) do
+        fixture("pypi", "pypi_simple_response_django.html")
+      end
+      let(:pypi_url) { "https://pypi.org/simple/django/" }
+      let(:dependency_name) { "django" }
+      let(:dependency_version) { "1.2.4" }
+
+      it { is_expected.to eq(Gem::Version.new("2.1.1")) }
+
+      context "and a python version specified" do
+        subject do
+          finder.lowest_security_fix_version(python_version: python_version)
+        end
+
+        context "that allows the safe version" do
+          let(:python_version) { Dependabot::Python::Version.new("3.6.3") }
+          it { is_expected.to eq(Gem::Version.new("2.1.1")) }
+        end
+
+        context "that forbids the safe version" do
+          let(:python_version) { Dependabot::Python::Version.new("2.7.11") }
+          it { is_expected.to be_nil }
+        end
+      end
+    end
   end
 end

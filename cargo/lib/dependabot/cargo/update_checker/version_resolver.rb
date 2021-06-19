@@ -7,8 +7,6 @@ require "dependabot/cargo/update_checker"
 require "dependabot/cargo/file_parser"
 require "dependabot/cargo/version"
 require "dependabot/errors"
-
-# rubocop:disable Metrics/ClassLength
 module Dependabot
   module Cargo
     class UpdateChecker
@@ -17,8 +15,10 @@ module Dependabot
           /Unable to update (?<url>.*?)$/.freeze
         BRANCH_NOT_FOUND_REGEX =
           /#{UNABLE_TO_UPDATE}.*to find branch `(?<branch>[^`]+)`/m.freeze
+        REVSPEC_PATTERN = /revspec '.*' not found/.freeze
+        OBJECT_PATTERN = /object not found - no match for id \(.*\)/.freeze
         REF_NOT_FOUND_REGEX =
-          /#{UNABLE_TO_UPDATE}.*revspec '.*' not found/m.freeze
+          /#{UNABLE_TO_UPDATE}.*(#{REVSPEC_PATTERN}|#{OBJECT_PATTERN})/m.freeze
 
         def initialize(dependency:, credentials:,
                        original_dependency_files:, prepared_dependency_files:)
@@ -80,9 +80,9 @@ module Dependabot
           end
         end
 
-        # rubocop:disable Metrics/AbcSize
-        # rubocop:disable Metrics/CyclomaticComplexity
         # rubocop:disable Metrics/PerceivedComplexity
+        # rubocop:disable Metrics/CyclomaticComplexity
+        # rubocop:disable Metrics/AbcSize
         def better_specification_needed?(error)
           return false if @custom_specification
           return false unless error.message.match?(/specification .* is ambigu/)
@@ -174,7 +174,6 @@ module Dependabot
         end
 
         # rubocop:disable Metrics/AbcSize
-        # rubocop:disable Metrics/CyclomaticComplexity
         # rubocop:disable Metrics/PerceivedComplexity
         # rubocop:disable Metrics/MethodLength
         def handle_cargo_errors(error)
@@ -215,8 +214,12 @@ module Dependabot
             raise Dependabot::GitDependencyReferenceNotFound, dependency_url
           end
 
-          if resolvability_error?(error.message)
-            raise Dependabot::DependencyFileNotResolvable, error.message
+          if workspace_native_library_update_error?(error.message)
+            # This happens when we're updating one part of a workspace which
+            # triggers an update of a subdependency that uses a native library,
+            # whilst leaving another part of the workspace using an older
+            # version. Ideally we would prevent the subdependency update.
+            return nil
           end
 
           if git_dependency? && error.message.include?("no matching package")
@@ -232,10 +235,11 @@ module Dependabot
             return nil
           end
 
+          raise Dependabot::DependencyFileNotResolvable, error.message if resolvability_error?(error.message)
+
           raise error
         end
         # rubocop:enable Metrics/AbcSize
-        # rubocop:enable Metrics/CyclomaticComplexity
         # rubocop:enable Metrics/PerceivedComplexity
         # rubocop:enable Metrics/MethodLength
 
@@ -308,6 +312,19 @@ module Dependabot
           false
         end
 
+        def workspace_native_library_update_error?(message)
+          return unless message.include?("native library")
+
+          library_count = prepared_manifest_files.count do |file|
+            package_name = TomlRB.parse(file.content).dig("package", "name")
+            next false unless package_name
+
+            message.include?("depended on by `#{package_name} ")
+          end
+
+          library_count >= 2
+        end
+
         def write_manifest_files(prepared: true)
           manifest_files = if prepared then prepared_manifest_files
                            else original_manifest_files
@@ -318,6 +335,10 @@ module Dependabot
             dir = Pathname.new(path).dirname
             FileUtils.mkdir_p(dir)
             File.write(file.name, sanitized_manifest_content(file.content))
+
+            next if virtual_manifest?(file)
+
+            File.write(File.join(dir, "build.rs"), dummy_app_content)
 
             FileUtils.mkdir_p(File.join(dir, "src"))
             File.write(File.join(dir, "src/lib.rs"), dummy_app_content)
@@ -350,12 +371,12 @@ module Dependabot
 
           object.delete("bin")
 
+          object["package"].delete("default-run") if object.dig("package", "default-run")
+
           package_name = object.dig("package", "name")
           return TomlRB.dump(object) unless package_name&.match?(/[\{\}]/)
 
-          if lockfile
-            raise "Sanitizing name for pkg with lockfile. Investigate!"
-          end
+          raise "Sanitizing name for pkg with lockfile. Investigate!" if lockfile
 
           object["package"]["name"] = "sanitized"
           TomlRB.dump(object)
@@ -390,6 +411,13 @@ module Dependabot
           ).git_dependency?
         end
 
+        # When the package table is not present in a workspace manifest, it is
+        # called a virtual manifest: https://doc.rust-lang.org/cargo/reference/
+        # manifest.html#virtual-manifest
+        def virtual_manifest?(file)
+          !file.content.include?("[package]")
+        end
+
         def version_class
           Cargo::Version
         end
@@ -397,4 +425,3 @@ module Dependabot
     end
   end
 end
-# rubocop:enable Metrics/ClassLength

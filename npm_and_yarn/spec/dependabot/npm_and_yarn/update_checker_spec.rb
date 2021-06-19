@@ -34,14 +34,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
   end
   let(:ignored_versions) { [] }
   let(:security_advisories) { [] }
-  let(:dependency_files) { [package_json] }
-  let(:package_json) do
-    Dependabot::DependencyFile.new(
-      name: "package.json",
-      content: fixture("package_files", manifest_fixture_name)
-    )
-  end
-  let(:manifest_fixture_name) { "package.json" }
+  let(:dependency_files) { project_dependency_files("npm6/no_lockfile") }
 
   let(:credentials) do
     [{
@@ -52,9 +45,10 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
     }]
   end
 
+  let(:dependency_name) { "etag" }
   let(:dependency) do
     Dependabot::Dependency.new(
-      name: "etag",
+      name: dependency_name,
       version: dependency_version,
       requirements: [
         { file: "package.json", requirement: "^1.0.0", groups: [], source: nil }
@@ -63,6 +57,47 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
     )
   end
   let(:dependency_version) { "1.0.0" }
+
+  describe "#up_to_date?", :vcr do
+    context "with no lockfile" do
+      let(:dependency_files) { project_dependency_files("npm6/peer_dependency_typescript_no_lockfile") }
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "typescript",
+          version: nil,
+          requirements: [{
+            requirement: "3.7",
+            file: "package.json",
+            groups: [],
+            source: nil
+          }],
+          package_manager: "npm_and_yarn"
+        )
+      end
+
+      it "returns false when there is a newer version available" do
+        expect(checker.up_to_date?).to be_falsy
+      end
+    end
+
+    context "with a latest version requirement" do
+      let(:dependency_files) { project_dependency_files("npm7/latest_requirement") }
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "etag",
+          version: nil,
+          requirements: [
+            { file: "package.json", requirement: "latest", groups: [], source: nil }
+          ],
+          package_manager: "npm_and_yarn"
+        )
+      end
+
+      it "is up to date because there's nothing to update" do
+        expect(checker.up_to_date?).to be_truthy
+      end
+    end
+  end
 
   describe "#can_update?" do
     subject { checker.can_update?(requirements_to_unlock: :own) }
@@ -164,6 +199,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
   end
 
   describe "#latest_version" do
+    let(:dependency_files) { project_dependency_files("npm6/no_lockfile") }
     subject { checker.latest_version }
 
     it "delegates to LatestVersionFinder" do
@@ -172,6 +208,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
         credentials: credentials,
         dependency_files: dependency_files,
         ignored_versions: ignored_versions,
+        raise_on_ignored: false,
         security_advisories: security_advisories
       ).and_call_original
 
@@ -181,6 +218,37 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
     it "only hits the registry once" do
       checker.latest_version
       expect(WebMock).to have_requested(:get, registry_listing_url).once
+    end
+
+    context "with multiple requirements" do
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "preact",
+          version: "0.1.0",
+          package_manager: "npm_and_yarn",
+          requirements: [
+            {
+              requirement: "^0.1.0",
+              file: "package-lock.json",
+              groups: ["dependencies"],
+              source: { type: "registry", url: "https://registry.npmjs.org" }
+            },
+            {
+              requirement: "^0.1.0",
+              file: "yarn.lock",
+              groups: ["dependencies"],
+              source: { type: "registry", url: "https://registry.yarnpkg.com" }
+            }
+          ]
+        )
+      end
+
+      before do
+        stub_request(:get, "https://registry.npmjs.org/preact").
+          and_return(status: 200, body: JSON.pretty_generate({}))
+      end
+
+      specify { expect { subject }.not_to raise_error }
     end
 
     context "with a git dependency" do
@@ -213,7 +281,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
           "content-type" => "application/x-git-upload-pack-advertisement"
         }
         stub_request(:get, git_url + "/info/refs?service=git-upload-pack").
-          with(basic_auth: ["x-access-token", "token"]).
+          with(basic_auth: %w(x-access-token token)).
           to_return(
             status: 200,
             body: fixture("git", "upload_packs", upload_pack_fixture),
@@ -245,7 +313,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
         end
 
         context "that doesn't exist" do
-          let(:ref) { "non-existant" }
+          let(:ref) { "nonexistent" }
           let(:req) { nil }
 
           it "fetches the latest SHA-1 hash of the head of the branch" do
@@ -345,6 +413,41 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
           let(:upload_pack_fixture) { "no_tags" }
           it { is_expected.to be_nil }
         end
+      end
+    end
+  end
+
+  describe "#lowest_security_fix_version" do
+    subject { checker.lowest_security_fix_version }
+
+    before do
+      stub_request(:get, registry_listing_url + "/1.0.1").
+        to_return(status: 200)
+    end
+
+    it "finds the lowest available non-vulnerable version" do
+      expect(checker.lowest_security_fix_version).
+        to eq(Gem::Version.new("1.0.1"))
+    end
+
+    context "with a security vulnerability" do
+      let(:security_advisories) do
+        [
+          Dependabot::SecurityAdvisory.new(
+            dependency_name: dependency_name,
+            package_manager: "npm_and_yarn",
+            vulnerable_versions: ["<= 1.2.0"]
+          )
+        ]
+      end
+
+      before do
+        stub_request(:get, registry_listing_url + "/1.2.1").
+          to_return(status: 200)
+      end
+
+      it "finds the lowest available non-vulnerable version" do
+        is_expected.to eq(Gem::Version.new("1.2.1"))
       end
     end
   end
@@ -459,6 +562,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
     subject { checker.latest_resolvable_version_with_no_unlock }
 
     context "with a non-git dependency" do
+      let(:dependency_files) { project_dependency_files("npm6/no_lockfile") }
       let(:dependency) do
         Dependabot::Dependency.new(
           name: "etag",
@@ -483,6 +587,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
           credentials: credentials,
           dependency_files: dependency_files,
           ignored_versions: ignored_versions,
+          raise_on_ignored: false,
           security_advisories: security_advisories
         ).and_call_original
 
@@ -550,7 +655,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
           "content-type" => "application/x-git-upload-pack-advertisement"
         }
         stub_request(:get, git_url + "/info/refs?service=git-upload-pack").
-          with(basic_auth: ["x-access-token", "token"]).
+          with(basic_auth: %w(x-access-token token)).
           to_return(
             status: 200,
             body: fixture("git", "upload_packs", "is-number"),
@@ -596,6 +701,36 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
           end
         end
       end
+    end
+  end
+
+  describe "#latest_resolvable_previous_version" do
+    let(:dependency_files) { project_dependency_files("npm6/no_lockfile") }
+    let(:updated_version) { Gem::Version.new("1.7.0") }
+    subject(:latest_resolvable_previous_version) do
+      checker.latest_resolvable_previous_version(updated_version)
+    end
+
+    it "delegates to VersionResolver" do
+      dummy_version_resolver =
+        instance_double(described_class::VersionResolver)
+
+      expect(described_class::VersionResolver).
+        to receive(:new).
+        with(
+          dependency: dependency,
+          credentials: credentials,
+          dependency_files: dependency_files,
+          latest_version_finder: described_class::LatestVersionFinder,
+          latest_allowable_version: updated_version
+        ).and_return(dummy_version_resolver)
+      expect(dummy_version_resolver).
+        to receive(:latest_resolvable_previous_version).
+        with(updated_version).
+        and_return(Gem::Version.new("1.6.0"))
+
+      expect(latest_resolvable_previous_version).
+        to eq(Gem::Version.new("1.6.0"))
     end
   end
 
@@ -713,7 +848,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
     context "with a library (that has a lockfile)" do
       # We've already stubbed hitting the registry for etag (since it's also
       # the dependency we're checking in this spec)
-      let(:manifest_fixture_name) { "etag.json" }
+      let(:dependency_files) { project_dependency_files("npm6/etag_no_lockfile") }
 
       it "delegates to the RequirementsUpdater" do
         expect(described_class::RequirementsUpdater).
@@ -774,7 +909,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
           "content-type" => "application/x-git-upload-pack-advertisement"
         }
         stub_request(:get, git_url + "/info/refs?service=git-upload-pack").
-          with(basic_auth: ["x-access-token", "token"]).
+          with(basic_auth: %w(x-access-token token)).
           to_return(
             status: 200,
             body: fixture("git", "upload_packs", "is-number"),
@@ -900,7 +1035,7 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
     end
 
     context "updating a deprecated dependency with a peer requirement" do
-      let(:manifest_fixture_name) { "peer_dependency.json" }
+      let(:dependency_files) { project_dependency_files("npm6/peer_dependency_no_lockfile") }
       let(:registry_listing_url) { "https://registry.npmjs.org/react-dom" }
       let(:registry_response) do
         fixture("npm_responses", "peer_dependency_deprecated.json")
@@ -944,6 +1079,131 @@ RSpec.describe Dependabot::NpmAndYarn::UpdateChecker do
         expect(checker.updated_requirements).
           to eq(dependency_requirements)
       end
+    end
+
+    context "with multiple requirements" do
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "@org/etag",
+          version: "1.0",
+          requirements: [
+            {
+              file: "package.json",
+              requirement: "^1.0",
+              groups: [],
+              source: {
+                type: "registry",
+                url: "https://registry.npmjs.org"
+              }
+            },
+            {
+              file: "package.json",
+              requirement: "^1.0",
+              groups: [],
+              source: {
+                type: "registry",
+                url: "https://npm.fury.io/dependabot"
+              }
+            }
+          ],
+          package_manager: "npm_and_yarn"
+        )
+      end
+
+      before do
+        stub_request(:get, "https://npm.fury.io/dependabot/@org%2Fetag").
+          and_return(status: 200, body: JSON.pretty_generate({}))
+      end
+
+      it "prefers to private registry source" do
+        expect(checker.updated_requirements.first).to eq(
+          {
+            file: "package.json",
+            groups: [],
+            requirement: "^1.0",
+            source: {
+              type: "registry",
+              url: "https://npm.fury.io/dependabot"
+            }
+          }
+        )
+      end
+    end
+  end
+
+  context "#updated_dependencies_after_full_unlock" do
+    let(:dependency_files) { project_dependency_files("npm6/no_lockfile") }
+    let(:dependency) do
+      Dependabot::Dependency.new(
+        name: "etag",
+        version: dependency_version,
+        requirements: dependency_requirements,
+        package_manager: "npm_and_yarn"
+      )
+    end
+    let(:dependency_requirements) do
+      [{
+        file: "package.json",
+        requirement: "^1.0.0",
+        groups: [],
+        source: nil
+      }]
+    end
+
+    it "delegates to the VersionResolver" do
+      dummy_version_resolver =
+        instance_double(described_class::VersionResolver)
+
+      expect(described_class::VersionResolver).
+        to receive(:new).
+        with(
+          dependency: dependency,
+          credentials: credentials,
+          dependency_files: dependency_files,
+          latest_version_finder: described_class::LatestVersionFinder,
+          latest_allowable_version: Gem::Version.new("1.7.0")
+        ).and_return(dummy_version_resolver)
+      expect(dummy_version_resolver).
+        to receive(:dependency_updates_from_full_unlock).
+        and_return(
+          [{
+            dependency: Dependabot::Dependency.new(
+              name: "etag",
+              version: nil,
+              package_manager: "npm_and_yarn",
+              requirements: [{
+                file: "package.json",
+                requirement: "^1.6.0",
+                groups: ["dependencies"],
+                source: nil
+              }]
+            ),
+            version: Dependabot::NpmAndYarn::Version.new("1.7.0"),
+            previous_version: nil
+          }]
+        )
+
+      expect(checker.send(:updated_dependencies_after_full_unlock).first).
+        to eq(
+          Dependabot::Dependency.new(
+            name: "etag",
+            version: "1.7.0",
+            package_manager: "npm_and_yarn",
+            previous_version: nil,
+            requirements: [{
+              file: "package.json",
+              requirement: "^1.7.0",
+              groups: ["dependencies"],
+              source: nil
+            }],
+            previous_requirements: [{
+              file: "package.json",
+              requirement: "^1.6.0",
+              groups: ["dependencies"],
+              source: nil
+            }]
+          )
+        )
     end
   end
 end

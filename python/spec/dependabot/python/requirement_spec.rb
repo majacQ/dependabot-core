@@ -90,6 +90,15 @@ RSpec.describe Dependabot::Python::Requirement do
         end
       end
 
+      context "with a bad character after the wildcard" do
+        let(:requirement_string) { "== 1.3.*'" }
+
+        it "raises a helpful error" do
+          expect { subject }.
+            to raise_error(Gem::Requirement::BadRequirementError)
+        end
+      end
+
       context "with a >= op" do
         let(:requirement_string) { ">= 1.3.*" }
         it { is_expected.to eq(described_class.new(">= 1.3.a")) }
@@ -110,7 +119,7 @@ RSpec.describe Dependabot::Python::Requirement do
     context "with an array" do
       let(:requirement_string) { ["== 1.3.*", ">= 1.3.1"] }
       its(:to_s) do
-        is_expected.to eq(Gem::Requirement.new([">= 1.3.1", "~> 1.3.0.a"]).to_s)
+        is_expected.to eq(Gem::Requirement.new(["~> 1.3.0.a", ">= 1.3.1"]).to_s)
       end
     end
 

@@ -7,7 +7,7 @@
         "requires": {},
         "sources": [
             {
-                "url": "https://pypi.python.org/simple",
+                "url": "https://pypi.org/simple",
                 "verify_ssl": true
             }
         ]
@@ -36,7 +36,8 @@
         },
         "e1839a8": {
             "editable": true,
-            "path": "./mydep"
+            "path": "./mydep",
+            "version": "==0.0.0"
         },
         "idna": {
             "hashes": [

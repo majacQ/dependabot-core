@@ -2,9 +2,11 @@
 
 require "toml-rb"
 
+require "dependabot/dependency"
 require "dependabot/python/file_parser"
 require "dependabot/python/file_updater"
 require "dependabot/python/authed_url_builder"
+require "dependabot/python/name_normaliser"
 
 module Dependabot
   module Python
@@ -44,7 +46,6 @@ module Dependabot
           TomlRB.dump(pipfile_object)
         end
 
-        # rubocop:disable Metrics/PerceivedComplexity
         def freeze_dependency(dep_name, pipfile_object, keys)
           locked_version = version_from_lockfile(
             keys[:lockfile],
@@ -64,7 +65,6 @@ module Dependabot
             pipfile_object[keys[:pipfile]][dep_name] = "==#{locked_version}"
           end
         end
-        # rubocop:enable Metrics/PerceivedComplexity
 
         def update_python_requirement(requirement)
           pipfile_object = TomlRB.parse(pipfile_content)
@@ -102,9 +102,8 @@ module Dependabot
           @parsed_lockfile ||= JSON.parse(lockfile.content)
         end
 
-        # See https://www.python.org/dev/peps/pep-0503/#normalized-names
         def normalise(name)
-          name.downcase.gsub(/[-_.]+/, "-")
+          NameNormaliser.normalise(name)
         end
 
         def pipfile_sources

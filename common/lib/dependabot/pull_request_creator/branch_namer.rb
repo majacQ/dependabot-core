@@ -17,9 +17,6 @@ module Dependabot
         @prefix        = prefix
       end
 
-      # rubocop:disable Metrics/AbcSize
-      # rubocop:disable Metrics/PerceivedComplexity
-      # rubocop:disable Metrics/CyclomaticComplexity
       def new_branch_name
         @name ||=
           begin
@@ -29,28 +26,19 @@ module Dependabot
               elsif dependencies.count > 1 && updating_a_dependency_set?
                 dependency_set.fetch(:group)
               else
-                dependencies.map(&:name).join("-and-").tr(":", "-")
+                dependencies.
+                  map(&:name).
+                  join("-and-").
+                  tr(":[]", "-").
+                  tr("@", "")
               end
 
-            dep = dependencies.first
-
-            if library? && ref_changed?(dependencies.first)
-              "#{dependency_name_part}-#{new_ref(dep)}"
-            elsif library?
-              "#{dependency_name_part}-#{sanitized_requirement(dep)}"
-            else
-              "#{dependency_name_part}-#{new_version(dep)}"
-            end
+            "#{dependency_name_part}-#{branch_version_suffix}"
           end
 
-        branch_name = File.join(prefixes, @name).gsub(%r{/\.}, "/dot-")
-
         # Some users need branch names without slashes
-        branch_name.gsub("/", separator)
+        sanitize_ref(File.join(prefixes, @name).gsub("/", separator))
       end
-      # rubocop:enable Metrics/AbcSize
-      # rubocop:enable Metrics/PerceivedComplexity
-      # rubocop:enable Metrics/CyclomaticComplexity
 
       private
 
@@ -99,6 +87,18 @@ module Dependabot
         @dependency_set
       end
 
+      def branch_version_suffix
+        dep = dependencies.first
+
+        if library? && ref_changed?(dep) && new_ref(dep)
+          new_ref(dep)
+        elsif library?
+          sanitized_requirement(dep)
+        else
+          new_version(dep)
+        end
+      end
+
       def sanitized_requirement(dependency)
         new_library_requirement(dependency).
           delete(" ").
@@ -118,8 +118,10 @@ module Dependabot
       end
 
       def new_version(dependency)
+        # Version looks like a git SHA and we could be updating to a specific
+        # ref in which case we return that otherwise we return a shorthand sha
         if dependency.version.match?(/^[0-9a-f]{40}$/)
-          return new_ref(dependency) if ref_changed?(dependency)
+          return new_ref(dependency) if ref_changed?(dependency) && new_ref(dependency)
 
           dependency.version[0..6]
         elsif dependency.version == dependency.previous_version &&
@@ -133,20 +135,22 @@ module Dependabot
       end
 
       def previous_ref(dependency)
-        dependency.previous_requirements.map do |r|
+        previous_refs = dependency.previous_requirements.map do |r|
           r.dig(:source, "ref") || r.dig(:source, :ref)
-        end.compact.first
+        end.compact.uniq
+        return previous_refs.first if previous_refs.count == 1
       end
 
       def new_ref(dependency)
-        dependency.requirements.map do |r|
+        new_refs = dependency.requirements.map do |r|
           r.dig(:source, "ref") || r.dig(:source, :ref)
-        end.compact.first
+        end.compact.uniq
+        return new_refs.first if new_refs.count == 1
       end
 
       def ref_changed?(dependency)
-        previous_ref(dependency) && new_ref(dependency) &&
-          previous_ref(dependency) != new_ref(dependency)
+        # We could go from multiple previous refs (nil) to a single new ref
+        previous_ref(dependency) != new_ref(dependency)
       end
 
       def new_library_requirement(dependency)
@@ -160,16 +164,34 @@ module Dependabot
         updated_reqs.first[:requirement]
       end
 
+      # TODO: Bring this in line with existing library checks that we do in the
+      # update checkers, which are also overriden by passing an explicit
+      # `requirements_update_strategy`.
+      #
+      # TODO re-use in MessageBuilder
       def library?
-        if files.map(&:name).any? { |name| name.end_with?(".gemspec") }
-          return true
-        end
-
-        dependencies.none?(&:appears_in_lockfile?)
+        dependencies.any? { |d| !d.appears_in_lockfile? }
       end
 
       def requirements_changed?(dependency)
         (dependency.requirements - dependency.previous_requirements).any?
+      end
+
+      def sanitize_ref(ref)
+        # This isn't a complete implementation of git's ref validation, but it
+        # covers most cases that crop up. Its list of allowed charactersr is a
+        # bit stricter than git's, but that's for cosmetic reasons.
+        ref.
+          # Remove forbidden characters (those not already replaced elsewhere)
+          gsub(%r{[^A-Za-z0-9/\-_.(){}]}, "").
+          # Slashes can't be followed by periods
+          gsub(%r{/\.}, "/dot-").
+          # Two or more sequential periods are forbidden
+          gsub(/\.+/, ".").
+          # Two or more sequential slashes are forbidden
+          gsub(%r{/+}, "/").
+          # Trailing periods are forbidden
+          sub(/\.$/, "")
       end
     end
   end

@@ -6,6 +6,7 @@ module Dependabot
   class Dependency
     @production_checks = {}
     @display_name_builders = {}
+    @name_normalisers = {}
 
     def self.production_check_for_package_manager(package_manager)
       production_check = @production_checks[package_manager]
@@ -26,11 +27,21 @@ module Dependabot
       @display_name_builders[package_manager] = name_builder
     end
 
+    def self.name_normaliser_for_package_manager(package_manager)
+      @name_normalisers[package_manager] || ->(name) { name }
+    end
+
+    def self.register_name_normaliser(package_manager, name_builder)
+      @name_normalisers[package_manager] = name_builder
+    end
+
     attr_reader :name, :version, :requirements, :package_manager,
-                :previous_version, :previous_requirements
+                :previous_version, :previous_requirements,
+                :subdependency_metadata
 
     def initialize(name:, requirements:, package_manager:, version: nil,
-                   previous_version: nil, previous_requirements: nil)
+                   previous_version: nil, previous_requirements: nil,
+                   subdependency_metadata: [])
       @name = name
       @version = version
       @requirements = requirements.map { |req| symbolize_keys(req) }
@@ -38,6 +49,10 @@ module Dependabot
       @previous_requirements =
         previous_requirements&.map { |req| symbolize_keys(req) }
       @package_manager = package_manager
+      unless top_level? || subdependency_metadata == []
+        @subdependency_metadata = subdependency_metadata&.
+                                  map { |h| symbolize_keys(h) }
+      end
 
       check_values
     end
@@ -53,8 +68,9 @@ module Dependabot
         "requirements" => requirements,
         "previous_version" => previous_version,
         "previous_requirements" => previous_requirements,
-        "package_manager" => package_manager
-      }
+        "package_manager" => package_manager,
+        "subdependency_metadata" => subdependency_metadata
+      }.compact
     end
 
     def appears_in_lockfile?
@@ -62,13 +78,17 @@ module Dependabot
     end
 
     def production?
-      return true unless top_level?
+      return subdependency_production_check unless top_level?
 
       groups = requirements.flat_map { |r| r.fetch(:groups).map(&:to_s) }
 
       self.class.
         production_check_for_package_manager(package_manager).
         call(groups)
+    end
+
+    def subdependency_production_check
+      !subdependency_metadata&.all? { |h| h[:production] == false }
     end
 
     def display_name
@@ -98,6 +118,11 @@ module Dependabot
         raise ArgumentError, "blank strings must not be provided as versions"
       end
 
+      check_requirement_fields
+      check_subdependency_metadata
+    end
+
+    def check_requirement_fields
       requirement_fields = [requirements, previous_requirements].compact
       unless requirement_fields.all? { |r| r.is_a?(Array) } &&
              requirement_fields.flatten.all? { |r| r.is_a?(Hash) }
@@ -119,8 +144,17 @@ module Dependabot
       raise ArgumentError, "blank strings must not be provided as requirements"
     end
 
+    def check_subdependency_metadata
+      return unless subdependency_metadata
+
+      unless subdependency_metadata.is_a?(Array) &&
+             subdependency_metadata.all? { |r| r.is_a?(Hash) }
+        raise ArgumentError, "subdependency_metadata must be an array of hashes"
+      end
+    end
+
     def symbolize_keys(hash)
-      Hash[hash.keys.map { |k| [k.to_sym, hash[k]] }]
+      hash.keys.map { |k| [k.to_sym, hash[k]] }.to_h
     end
   end
 end

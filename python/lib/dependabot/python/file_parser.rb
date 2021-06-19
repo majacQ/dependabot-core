@@ -9,6 +9,7 @@ require "dependabot/shared_helpers"
 require "dependabot/python/requirement"
 require "dependabot/errors"
 require "dependabot/python/native_helpers"
+require "dependabot/python/name_normaliser"
 
 module Dependabot
   module Python
@@ -35,12 +36,15 @@ module Dependabot
       ).freeze
 
       def parse
+        # TODO: setup.py from external dependencies is evaluated. Provide guards before removing this.
+        raise Dependabot::UnexpectedExternalCode if @reject_external_code
+
         dependency_set = DependencySet.new
 
         dependency_set += pipenv_dependencies if pipfile
         dependency_set += poetry_dependencies if using_poetry?
         dependency_set += requirement_dependencies if requirement_files.any?
-        dependency_set += setup_file_dependencies if setup_file
+        dependency_set += setup_file_dependencies if setup_file || setup_cfg_file
 
         dependency_set.dependencies
       end
@@ -91,7 +95,7 @@ module Dependabot
 
           dependencies <<
             Dependency.new(
-              name: normalised_name(dep["name"]),
+              name: normalised_name(dep["name"], dep["extras"]),
               version: dep["version"]&.include?("*") ? nil : dep["version"],
               requirements: requirements,
               package_manager: "pip"
@@ -119,11 +123,11 @@ module Dependabot
       end
 
       def blocking_marker?(dep)
-        return false if dep["markers"].include?(">")
+        return false if dep["markers"] == "None"
         return true if dep["markers"].include?("<")
-        return true if dep["markers"].include?("==")
+        return false if dep["markers"].include?(">")
 
-        false
+        dep["requirement"]&.include?("<")
       end
 
       def setup_file_dependencies
@@ -136,6 +140,9 @@ module Dependabot
       def lockfile_for_pip_compile_file?(filename)
         return false unless pip_compile_files.any?
         return false unless filename.end_with?(".txt")
+
+        file = dependency_files.find { |f| f.name == filename }
+        return true if file&.content&.match?(output_file_regex(filename))
 
         basename = filename.gsub(/\.txt$/, "")
         pip_compile_files.any? { |f| f.name == basename + ".in" }
@@ -177,13 +184,21 @@ module Dependabot
           each do |file|
             path = file.name
             FileUtils.mkdir_p(Pathname.new(path).dirname)
-            File.write(path, file.content)
+            File.write(path, remove_imports(file))
           end
       end
 
-      # See https://www.python.org/dev/peps/pep-0503/#normalized-names
-      def normalised_name(name)
-        name.downcase.gsub(/[-_.]+/, "-")
+      def remove_imports(file)
+        return file.content if file.path.end_with?(".tar.gz", ".whl", ".zip")
+
+        file.content.lines.
+          reject { |l| l.match?(/^['"]?(?<path>\..*?)(?=\[|#|'|"|$)/) }.
+          reject { |l| l.match?(/^(?:-e)\s+['"]?(?<path>.*?)(?=\[|#|'|"|$)/) }.
+          join
+      end
+
+      def normalised_name(name, extras = [])
+        NameNormaliser.normalise_including_extras(name, extras)
       end
 
       def check_required_files
@@ -192,8 +207,9 @@ module Dependabot
         return if pipfile
         return if pyproject
         return if setup_file
+        return if setup_cfg_file
 
-        raise "No requirements.txt or setup.py!"
+        raise "Missing required files!"
       end
 
       def pipfile
@@ -213,6 +229,10 @@ module Dependabot
         raise Dependabot::DependencyFileNotParseable, pyproject.path
       end
 
+      def output_file_regex(filename)
+        "--output-file[=\s]+#{Regexp.escape(filename)}(?:\s|$)"
+      end
+
       def pyproject
         @pyproject ||= get_original_file("pyproject.toml")
       end
@@ -229,6 +249,10 @@ module Dependabot
         @setup_file ||= get_original_file("setup.py")
       end
 
+      def setup_cfg_file
+        @setup_cfg_file ||= get_original_file("setup.cfg")
+      end
+
       def pip_compile_files
         @pip_compile_files ||=
           dependency_files.select { |f| f.name.end_with?(".in") }
@@ -237,5 +261,4 @@ module Dependabot
   end
 end
 
-Dependabot::FileParsers.
-  register("pip", Dependabot::Python::FileParser)
+Dependabot::FileParsers.register("pip", Dependabot::Python::FileParser)

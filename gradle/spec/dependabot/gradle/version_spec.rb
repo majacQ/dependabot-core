@@ -19,6 +19,11 @@ RSpec.describe Dependabot::Gradle::Version do
       let(:version_string) { "Finchley" }
       it { is_expected.to eq(true) }
     end
+
+    context "with a dynamic version" do
+      let(:version_string) { "1.+" }
+      it { is_expected.to eq(true) }
+    end
   end
 
   describe "#to_s" do
@@ -73,6 +78,11 @@ RSpec.describe Dependabot::Gradle::Version do
       it { is_expected.to eq(false) }
     end
 
+    context "with a pre-release" do
+      let(:version_string) { "2.10.0.pr3" }
+      it { is_expected.to eq(true) }
+    end
+
     context "with a release" do
       let(:version_string) { "1.0.0" }
       it { is_expected.to eq(false) }
@@ -82,10 +92,20 @@ RSpec.describe Dependabot::Gradle::Version do
       let(:version_string) { "1.0.0.sp7" }
       it { is_expected.to eq(false) }
     end
+
+    context "with an early access programme token" do
+      let(:version_string) { "1.2.1-1.3.40-eap13-67" }
+      it { is_expected.to eq(true) }
+    end
+
+    context "with a dev token" do
+      let(:version_string) { "1.2.1-dev-65" }
+      it { is_expected.to eq(true) }
+    end
   end
 
   describe "#<=>" do
-    subject { version.send(:"<=>", other_version) }
+    subject { version.send(:<=>, other_version) }
 
     context "compared to a Gem::Version" do
       context "that is lower" do

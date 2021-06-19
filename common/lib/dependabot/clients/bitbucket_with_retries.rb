@@ -29,7 +29,7 @@ module Dependabot
 
       def initialize(max_retries: 3, **args)
         @max_retries = max_retries || 3
-        @client = Bitbucket.new(args)
+        @client = Bitbucket.new(**args)
       end
 
       def method_missing(method_name, *args, &block)
@@ -47,7 +47,6 @@ module Dependabot
         @client.respond_to?(method_name) || super
       end
 
-      # rubocop:disable Naming/RescuedExceptionsVariableName
       def retry_connection_failures
         retry_attempt = 0
 
@@ -58,7 +57,6 @@ module Dependabot
           retry_attempt <= @max_retries ? retry : raise
         end
       end
-      # rubocop:enable Naming/RescuedExceptionsVariableName
     end
   end
 end

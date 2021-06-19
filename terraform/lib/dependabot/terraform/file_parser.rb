@@ -10,27 +10,42 @@ require "dependabot/file_parsers/base"
 require "dependabot/git_commit_checker"
 require "dependabot/shared_helpers"
 require "dependabot/errors"
+require "dependabot/terraform/file_selector"
 
 module Dependabot
   module Terraform
     class FileParser < Dependabot::FileParsers::Base
       require "dependabot/file_parsers/base/dependency_set"
 
+      include FileSelector
+
       ARCHIVE_EXTENSIONS = %w(.zip .tbz2 .tgz .txz).freeze
+      DEFAULT_REGISTRY = "registry.terraform.io"
+      DEFAULT_NAMESPACE = "hashicorp"
+      # https://www.terraform.io/docs/language/providers/requirements.html#source-addresses
+      PROVIDER_SOURCE_ADDRESS = %r{\A((?<hostname>.+)/)?(?<namespace>.+)/(?<name>.+)\z}.freeze
 
       def parse
         dependency_set = DependencySet.new
 
         terraform_files.each do |file|
-          modules = parsed_file(file).fetch("module", []).map(&:first)
+          modules = parsed_file(file).fetch("module", {})
           modules.each do |name, details|
             dependency_set << build_terraform_dependency(file, name, details)
+          end
+
+          parsed_file(file).fetch("terraform", []).each do |terraform|
+            required_providers = terraform.fetch("required_providers", {})
+            required_providers.each do |provider|
+              provider.each do |name, details|
+                dependency_set << build_provider_dependency(file, name, details)
+              end
+            end
           end
         end
 
         terragrunt_files.each do |file|
-          modules = parsed_file(file).fetch("terragrunt", []).first || {}
-          modules = modules.fetch("terraform", [])
+          modules = parsed_file(file).fetch("terraform", [])
           modules.each do |details|
             next unless details["source"]
 
@@ -38,7 +53,7 @@ module Dependabot
           end
         end
 
-        dependency_set.dependencies
+        dependency_set.dependencies.sort_by(&:name)
       end
 
       private
@@ -47,8 +62,11 @@ module Dependabot
         details = details.first
 
         source = source_from(details)
-        dep_name =
-          source[:type] == "registry" ? source[:module_identifier] : name
+        dep_name = case source[:type]
+                   when "registry" then source[:module_identifier]
+                   when "provider" then details["source"]
+                   else name
+                   end
         version_req = details["version"]&.strip
         version =
           if source[:type] == "git" then version_from_ref(source[:ref])
@@ -66,6 +84,46 @@ module Dependabot
             source: source
           ]
         )
+      end
+
+      def build_provider_dependency(file, name, details = {})
+        deprecated_provider_error(file) if deprecated_provider?(details)
+
+        source_address = details.fetch("source", nil)
+        version_req = details["version"]&.strip
+        hostname, namespace, name = provider_source_from(source_address, name)
+        dependency_name = source_address ? "#{namespace}/#{name}" : name
+
+        Dependency.new(
+          name: dependency_name,
+          version: determine_version_for(hostname, namespace, name, version_req),
+          package_manager: "terraform",
+          requirements: [
+            requirement: version_req,
+            groups: [],
+            file: file.name,
+            source: {
+              type: "provider",
+              registry_hostname: hostname,
+              module_identifier: "#{namespace}/#{name}"
+            }
+          ]
+        )
+      end
+
+      def deprecated_provider_error(file)
+        raise Dependabot::DependencyFileNotParseable.new(
+          file.path,
+          "This terraform provider syntax is now deprecated.\n"\
+          "See https://www.terraform.io/docs/language/providers/requirements.html "\
+          "for the new Terraform v0.13+ provider syntax."
+        )
+      end
+
+      def deprecated_provider?(details)
+        # The old syntax for terraform providers v0.12- looked like
+        # "tls ~> 2.1" which gets parsed as a string instead of a hash
+        details.is_a?(String)
       end
 
       def build_terragrunt_dependency(file, details)
@@ -111,14 +169,23 @@ module Dependabot
         source_details
       end
 
+      def provider_source_from(source_address, name)
+        matches = source_address&.match(PROVIDER_SOURCE_ADDRESS)
+        [
+          matches.try(:[], :hostname) || DEFAULT_REGISTRY,
+          matches.try(:[], :namespace) || DEFAULT_NAMESPACE,
+          matches.try(:[], :name) || name
+        ]
+      end
+
       def registry_source_details_from(source_string)
-        parts = source_string.split("/")
+        parts = source_string.split("//").first.split("/")
 
         if parts.count == 3
           {
             type: "registry",
             registry_hostname: "registry.terraform.io",
-            module_identifier: source_string
+            module_identifier: source_string.split("//").first
           }
         elsif parts.count == 4
           {
@@ -134,9 +201,7 @@ module Dependabot
 
       def git_source_details_from(source_string)
         git_url = source_string.strip.gsub(/^git::/, "")
-        unless git_url.start_with?("git@") || git_url.include?("://")
-          git_url = "https://" + git_url
-        end
+        git_url = "https://" + git_url unless git_url.start_with?("git@") || git_url.include?("://")
 
         bare_uri =
           if git_url.include?("git@")
@@ -163,6 +228,7 @@ module Dependabot
         ref.match(version_regex).named_captures.fetch("version")
       end
 
+      # rubocop:disable Metrics/PerceivedComplexity
       # See https://www.terraform.io/docs/modules/sources.html#http-urls for
       # details of how Terraform handle HTTP(S) sources for modules
       def get_proxied_source(raw_source)
@@ -180,17 +246,15 @@ module Dependabot
           **SharedHelpers.excon_defaults
         )
 
-        if response.headers["X-Terraform-Get"]
-          return response.headers["X-Terraform-Get"]
-        end
+        return response.headers["X-Terraform-Get"] if response.headers["X-Terraform-Get"]
 
         doc = Nokogiri::XML(response.body)
         doc.css("meta").find do |tag|
           tag.attributes&.fetch("name", nil)&.value == "terraform-get"
         end&.attributes&.fetch("content", nil)&.value
       end
+      # rubocop:enable Metrics/PerceivedComplexity
 
-      # rubocop:disable Metrics/CyclomaticComplexity
       # rubocop:disable Metrics/PerceivedComplexity
       def source_type(source_string)
         return :path if source_string.start_with?(".")
@@ -200,9 +264,7 @@ module Dependabot
         return :mercurial if source_string.start_with?("hg::")
         return :s3 if source_string.start_with?("s3::")
 
-        if source_string.split("/").first.include?("::")
-          raise "Unknown src: #{source_string}"
-        end
+        raise "Unknown src: #{source_string}" if source_string.split("/").first.include?("::")
 
         return :registry unless source_string.start_with?("http")
 
@@ -213,33 +275,53 @@ module Dependabot
 
         raise "HTTP source, but not an archive!"
       end
-      # rubocop:enable Metrics/CyclomaticComplexity
       # rubocop:enable Metrics/PerceivedComplexity
 
+      # == Returns:
+      # A Hash representing each module found in the specified file
+      #
+      # E.g.
+      # {
+      #   "module" => {
+      #     {
+      #       "consul" => [
+      #         {
+      #           "source"=>"consul/aws",
+      #           "version"=>"0.1.0"
+      #         }
+      #       ]
+      #     }
+      #   },
+      #   "terragrunt"=>[
+      #     {
+      #       "include"=>[{ "path"=>"${find_in_parent_folders()}" }],
+      #       "terraform"=>[{ "source" => "git::git@github.com:gruntwork-io/modules-example.git//consul?ref=v0.0.2" }]
+      #     }
+      #   ],
+      # }
       def parsed_file(file)
         @parsed_buildfile ||= {}
-        @parsed_buildfile[file.name] ||=
-          SharedHelpers.in_a_temporary_directory do
-            File.write("tmp.tf", file.content)
+        @parsed_buildfile[file.name] ||= SharedHelpers.in_a_temporary_directory do
+          File.write("tmp.tf", file.content)
 
-            command = "#{terraform_parser_path} -reverse < tmp.tf"
-            start = Time.now
-            stdout, stderr, process = Open3.capture3(command)
-            time_taken = Time.now - start
+          command = "#{terraform_hcl2_parser_path} < tmp.tf"
+          start = Time.now
+          stdout, stderr, process = Open3.capture3(command)
+          time_taken = Time.now - start
 
-            unless process.success?
-              raise SharedHelpers::HelperSubprocessFailed.new(
-                message: stderr,
-                error_context: {
-                  command: command,
-                  time_taken: time_taken,
-                  process_exit_value: process.to_s
-                }
-              )
-            end
-
-            JSON.parse(stdout)
+          unless process.success?
+            raise SharedHelpers::HelperSubprocessFailed.new(
+              message: stderr,
+              error_context: {
+                command: command,
+                time_taken: time_taken,
+                process_exit_value: process.to_s
+              }
+            )
           end
+
+          JSON.parse(stdout)
+        end
       rescue SharedHelpers::HelperSubprocessFailed => e
         msg = e.message.strip
         raise Dependabot::DependencyFileNotParseable.new(file.path, msg)
@@ -250,23 +332,37 @@ module Dependabot
         Pathname.new(File.join(helper_bin_dir, "json2hcl")).cleanpath.to_path
       end
 
+      def terraform_hcl2_parser_path
+        helper_bin_dir = File.join(native_helpers_root, "terraform/bin")
+        Pathname.new(File.join(helper_bin_dir, "hcl2json")).cleanpath.to_path
+      end
+
       def native_helpers_root
         default_path = File.join(__dir__, "../../../helpers/install-dir")
         ENV.fetch("DEPENDABOT_NATIVE_HELPERS_PATH", default_path)
-      end
-
-      def terraform_files
-        dependency_files.select { |f| f.name.end_with?(".tf") }
-      end
-
-      def terragrunt_files
-        dependency_files.select { |f| f.name.end_with?(".tfvars") }
       end
 
       def check_required_files
         return if [*terraform_files, *terragrunt_files].any?
 
         raise "No Terraform configuration file!"
+      end
+
+      def determine_version_for(hostname, namespace, name, constraint)
+        return constraint if constraint&.match?(/\A\d/)
+
+        lock_file_content.
+          dig("provider", "#{hostname}/#{namespace}/#{name}", 0, "version")
+      end
+
+      def lock_file_content
+        @lock_file_content ||=
+          begin
+            lock_file = dependency_files.find do |file|
+              file.name == ".terraform.lock.hcl"
+            end
+            lock_file ? parsed_file(lock_file) : {}
+          end
       end
     end
   end

@@ -21,10 +21,8 @@ RSpec.describe Dependabot::Composer::UpdateChecker::RequirementsUpdater do
       source: nil
     }
   end
-  let(:composer_json_req_string) { "^1.4.0" }
 
   let(:update_strategy) { :bump_versions }
-  let(:latest_resolvable_version) { "1.5.0" }
 
   describe "#updated_requirements" do
     subject { updater.updated_requirements.first }
@@ -619,6 +617,11 @@ RSpec.describe Dependabot::Composer::UpdateChecker::RequirementsUpdater do
           context "that the latest version does not satisfy" do
             let(:composer_json_req_string) { "~2.4.1" }
             its([:requirement]) { is_expected.to eq("~2.4.1 || ~2.5.0") }
+          end
+
+          context "with a leading space" do
+            let(:composer_json_req_string) { " ~2.4.1" }
+            its([:requirement]) { is_expected.to eq(" ~2.4.1 || ~2.5.0") }
           end
 
           context "including a pre-release" do

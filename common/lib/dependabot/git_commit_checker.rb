@@ -11,16 +11,23 @@ require "dependabot/utils"
 require "dependabot/source"
 require "dependabot/dependency"
 require "dependabot/git_metadata_fetcher"
-
 module Dependabot
   class GitCommitChecker
-    VERSION_REGEX = /(?<version>[0-9]+\.[0-9]+(?:\.[a-zA-Z0-9\-]+)*)$/.freeze
+    VERSION_REGEX = /
+      (?<version>
+        (?<=^v)[0-9]+(?:\-[a-z0-9]+)?
+        |
+        [0-9]+\.[0-9]+(?:\.[a-z0-9\-]+)*
+      )$
+    /ix.freeze
 
-    def initialize(dependency:, credentials:, ignored_versions: [],
+    def initialize(dependency:, credentials:,
+                   ignored_versions: [], raise_on_ignored: false,
                    requirement_class: nil, version_class: nil)
       @dependency = dependency
       @credentials = credentials
       @ignored_versions = ignored_versions
+      @raise_on_ignored = raise_on_ignored
       @requirement_class = requirement_class
       @version_class = version_class
     end
@@ -52,37 +59,52 @@ module Dependabot
       dependency_source_details.fetch(:ref).match?(VERSION_REGEX)
     end
 
+    def pinned_ref_looks_like_commit_sha?
+      ref = dependency_source_details.fetch(:ref)
+      return false unless ref&.match?(/^[0-9a-f]{6,40}$/)
+
+      return false unless pinned?
+
+      local_repo_git_metadata_fetcher.head_commit_for_ref(ref).nil?
+    end
+
     def branch_or_ref_in_release?(version)
       pinned_ref_in_release?(version) || branch_behind_release?(version)
     end
 
     def head_commit_for_current_branch
-      return dependency.version if pinned?
+      ref = ref_or_branch || "HEAD"
 
-      branch_ref = ref_or_branch ? "refs/heads/#{ref_or_branch}" : "HEAD"
+      if pinned?
+        return dependency.version ||
+               local_repo_git_metadata_fetcher.head_commit_for_ref(ref)
+      end
 
-      # Remove the opening clause of the upload pack as this isn't always
-      # followed by a line break. When it isn't (e.g., with Bitbucket) it causes
-      # problems for our `sha_for_update_pack_line` logic
-      line = local_upload_pack.
-             gsub(/.*git-upload-pack/, "").
-             lines.find { |l| l.include?(" #{branch_ref}") }
-
-      return sha_for_update_pack_line(line) if line
+      sha = local_repo_git_metadata_fetcher.head_commit_for_ref(ref)
+      return sha if sha
 
       raise Dependabot::GitDependencyReferenceNotFound, dependency.name
     end
 
+    # rubocop:disable Metrics/PerceivedComplexity
+    # rubocop:disable Metrics/AbcSize
     def local_tag_for_latest_version
-      tag =
+      tags =
         local_tags.
-        select { |t| version_tag?(t.name) && matches_existing_prefix?(t.name) }.
-        reject { |t| tag_included_in_ignore_reqs?(t) }.
-        reject { |t| tag_is_prerelease?(t) && !wants_prerelease? }.
-        max_by do |t|
-          version = t.name.match(VERSION_REGEX).named_captures.fetch("version")
-          version_class.new(version)
-        end
+        select { |t| version_tag?(t.name) && matches_existing_prefix?(t.name) }
+      filtered = tags.
+                 reject { |t| tag_included_in_ignore_requirements?(t) }
+      if @raise_on_ignored && filter_lower_versions(filtered).empty? && filter_lower_versions(tags).any?
+        raise Dependabot::AllVersionsIgnored
+      end
+
+      tag = filtered.
+            reject { |t| tag_is_prerelease?(t) && !wants_prerelease? }.
+            max_by do |t|
+              version = t.name.match(VERSION_REGEX).named_captures.
+                        fetch("version")
+              version_class.new(version)
+            end
 
       return unless tag
 
@@ -93,6 +115,39 @@ module Dependabot
         commit_sha: tag.commit_sha,
         tag_sha: tag.tag_sha
       }
+    end
+    # rubocop:enable Metrics/AbcSize
+    # rubocop:enable Metrics/PerceivedComplexity
+
+    def current_version
+      return unless dependency.version && version_tag?(dependency.version)
+
+      version = dependency.version.match(VERSION_REGEX).named_captures.fetch("version")
+      version_class.new(version)
+    end
+
+    def filter_lower_versions(tags)
+      return tags unless current_version
+
+      versions = tags.map do |t|
+        version = t.name.match(VERSION_REGEX).named_captures.fetch("version")
+        version_class.new(version)
+      end
+
+      versions.select do |version|
+        version > current_version
+      end
+    end
+
+    def local_tag_for_pinned_version
+      return unless pinned?
+
+      ref = dependency_source_details.fetch(:ref)
+      tags = local_tags.select { |t| t.commit_sha == ref && version_class.correct?(t.name) }.
+             sort_by { |t| version_class.new(t.name) }
+      return if tags.empty?
+
+      tags[-1].name
     end
 
     def git_repo_reachable?
@@ -212,7 +267,9 @@ module Dependabot
 
     def dependency_source_details
       sources =
-        dependency.requirements.map { |r| r.fetch(:source) }.uniq.compact
+        dependency.requirements.
+        map { |requirement| requirement.fetch(:source) }.uniq.compact.
+        select { |source| source[:type] == "git" }
 
       return sources.first if sources.count <= 1
 
@@ -240,8 +297,8 @@ module Dependabot
     def matches_existing_prefix?(tag)
       return true unless ref_or_branch&.match?(VERSION_REGEX)
 
-      ref_or_branch.gsub(VERSION_REGEX, "").gsub(/v$/, "") ==
-        tag.gsub(VERSION_REGEX, "").gsub(/v$/, "")
+      ref_or_branch.gsub(VERSION_REGEX, "").gsub(/v$/i, "") ==
+        tag.gsub(VERSION_REGEX, "").gsub(/v$/i, "")
     end
 
     def listing_source_url
@@ -297,8 +354,8 @@ module Dependabot
       listing_repo_git_metadata_fetcher.upload_pack
     end
 
-    def ignore_reqs
-      ignored_versions.map { |req| requirement_class.new(req.split(",")) }
+    def ignore_requirements
+      ignored_versions.flat_map { |req| requirement_class.requirements_array(req) }
     end
 
     def wants_prerelease?
@@ -310,9 +367,9 @@ module Dependabot
       version_class.new(version).prerelease?
     end
 
-    def tag_included_in_ignore_reqs?(tag)
+    def tag_included_in_ignore_requirements?(tag)
       version = tag.name.match(VERSION_REGEX).named_captures.fetch("version")
-      ignore_reqs.any? { |r| r.satisfied_by?(version_class.new(version)) }
+      ignore_requirements.any? { |r| r.satisfied_by?(version_class.new(version)) }
     end
 
     def tag_is_prerelease?(tag)
@@ -330,10 +387,6 @@ module Dependabot
       return @requirement_class if @requirement_class
 
       Utils.requirement_class_for_package_manager(dependency.package_manager)
-    end
-
-    def sha_for_update_pack_line(line)
-      line.split(" ").first.chars.last(40).join
     end
 
     def local_repo_git_metadata_fetcher

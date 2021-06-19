@@ -12,10 +12,10 @@ module Dependabot
       class RepositoryFinder
         DEFAULT_REPOSITORY_URL = "https://api.nuget.org/v3/index.json"
 
-        def initialize(dependency:, credentials:, config_file: nil)
+        def initialize(dependency:, credentials:, config_files: [])
           @dependency  = dependency
           @credentials = credentials
-          @config_file = config_file
+          @config_files = config_files
         end
 
         def dependency_urls
@@ -24,7 +24,7 @@ module Dependabot
 
         private
 
-        attr_reader :dependency, :credentials, :config_file
+        attr_reader :dependency, :credentials, :config_files
 
         def find_dependency_urls
           @find_dependency_urls ||=
@@ -41,11 +41,12 @@ module Dependabot
 
         def build_url_for_details(repo_details)
           response = get_repo_metadata(repo_details)
-          check_repo_reponse(response, repo_details)
+          check_repo_response(response, repo_details)
           return unless response.status == 200
 
-          base_url = base_url_from_v3_metadata(JSON.parse(response.body))
-          search_url = search_url_from_v3_metadata(JSON.parse(response.body))
+          body = remove_wrapping_zero_width_chars(response.body)
+          base_url = base_url_from_v3_metadata(JSON.parse(body))
+          search_url = search_url_from_v3_metadata(JSON.parse(body))
 
           details = {
             repository_url: repo_details.fetch(:url),
@@ -70,9 +71,10 @@ module Dependabot
         def get_repo_metadata(repo_details)
           Excon.get(
             repo_details.fetch(:url),
-            headers: auth_header_for_token(repo_details.fetch(:token)),
             idempotent: true,
-            **SharedHelpers.excon_defaults
+            **SharedHelpers.excon_defaults(
+              headers: auth_header_for_token(repo_details.fetch(:token))
+            )
           )
         end
 
@@ -92,10 +94,12 @@ module Dependabot
 
         def build_v2_url(response, repo_details)
           doc = Nokogiri::XML(response.body)
+
           doc.remove_namespaces!
           base_url = doc.at_xpath("service")&.attributes&.
                      fetch("base", nil)&.value
-          return unless base_url
+
+          base_url ||= repo_details.fetch(:url)
 
           {
             repository_url: base_url,
@@ -108,7 +112,7 @@ module Dependabot
           }
         end
 
-        def check_repo_reponse(response, details)
+        def check_repo_response(response, details)
           return unless [401, 402, 403].include?(response.status)
           raise if details.fetch(:url) == DEFAULT_REPOSITORY_URL
 
@@ -128,9 +132,7 @@ module Dependabot
           @known_repositories += credential_repositories
           @known_repositories += config_file_repositories
 
-          if @known_repositories.empty?
-            @known_repositories << { url: DEFAULT_REPOSITORY_URL, token: nil }
-          end
+          @known_repositories << { url: DEFAULT_REPOSITORY_URL, token: nil } if @known_repositories.empty?
 
           @known_repositories.uniq
         end
@@ -142,10 +144,14 @@ module Dependabot
             map { |c| { url: c.fetch("url"), token: c["token"] } }
         end
 
-        # rubocop:disable Metrics/AbcSize
         def config_file_repositories
-          return [] unless config_file
+          config_files.flat_map { |file| repos_from_config_file(file) }
+        end
 
+        # rubocop:disable Metrics/CyclomaticComplexity
+        # rubocop:disable Metrics/PerceivedComplexity
+        # rubocop:disable Metrics/AbcSize
+        def repos_from_config_file(config_file)
           doc = Nokogiri::XML(config_file.content)
           doc.remove_namespaces!
           sources =
@@ -160,6 +166,15 @@ module Dependabot
               }
             end
 
+          disabled_sources = disabled_sources(doc)
+          sources.reject! do |s|
+            disabled_sources.include?(s[:key])
+          end
+
+          unless doc.css("configuration > packageSources > clear").any?
+            sources << { url: DEFAULT_REPOSITORY_URL, key: nil }
+          end
+
           sources.reject! do |s|
             known_urls = credential_repositories.map { |cr| cr.fetch(:url) }
             known_urls.include?(s.fetch(:url))
@@ -173,6 +188,8 @@ module Dependabot
           sources
         end
         # rubocop:enable Metrics/AbcSize
+        # rubocop:enable Metrics/PerceivedComplexity
+        # rubocop:enable Metrics/CyclomaticComplexity
 
         def default_repository_details
           {
@@ -186,6 +203,21 @@ module Dependabot
           }
         end
 
+        # rubocop:disable Metrics/PerceivedComplexity
+        def disabled_sources(doc)
+          doc.css("configuration > disabledPackageSources > add").map do |node|
+            value = node.attribute("value")&.value ||
+                    node.at_xpath("./value")&.content
+
+            if value&.strip&.downcase == "true"
+              node.attribute("key")&.value&.strip ||
+                node.at_xpath("./key")&.content&.strip
+            end
+          end
+        end
+        # rubocop:enable Metrics/PerceivedComplexity
+
+        # rubocop:disable Metrics/PerceivedComplexity
         def add_config_file_credentials(sources:, doc:)
           sources.each do |source_details|
             key = source_details.fetch(:key)
@@ -205,7 +237,7 @@ module Dependabot
               find { |n| n.attribute("key")&.value == "ClearTextPassword" }&.
               attribute("value")&.value
 
-            # Note: We have to look for plain text passwords, as we have no
+            # NOTE: We have to look for plain text passwords, as we have no
             # way of decrypting encrypted passwords. For the same reason we
             # don't fetch API keys from the nuget.config at all.
             next source_details[:token] = nil unless username && password
@@ -217,6 +249,13 @@ module Dependabot
           end
 
           sources
+        end
+        # rubocop:enable Metrics/PerceivedComplexity
+
+        def remove_wrapping_zero_width_chars(string)
+          string.force_encoding("UTF-8").encode.
+            gsub(/\A[\u200B-\u200D\uFEFF]/, "").
+            gsub(/[\u200B-\u200D\uFEFF]\Z/, "")
         end
 
         def auth_header_for_token(token)

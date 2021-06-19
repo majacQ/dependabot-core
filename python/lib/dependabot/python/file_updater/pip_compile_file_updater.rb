@@ -1,12 +1,16 @@
 # frozen_string_literal: true
 
 require "open3"
+require "dependabot/dependency"
 require "dependabot/python/requirement_parser"
 require "dependabot/python/file_fetcher"
+require "dependabot/python/file_parser/python_requirement_parser"
 require "dependabot/python/file_updater"
 require "dependabot/shared_helpers"
 require "dependabot/python/native_helpers"
 require "dependabot/python/python_versions"
+require "dependabot/python/name_normaliser"
+require "dependabot/python/authed_url_builder"
 
 module Dependabot
   module Python
@@ -20,7 +24,7 @@ module Dependabot
         UNSAFE_PACKAGES = %w(setuptools distribute pip).freeze
         WARNINGS = /\s*# WARNING:.*\Z/m.freeze
         UNSAFE_NOTE =
-          /\s*The following packages are considered to be unsafe.*\Z/m.freeze
+          /\s*# The following packages are considered to be unsafe.*\Z/m.freeze
 
         attr_reader :dependencies, :dependency_files, :credentials
 
@@ -58,8 +62,6 @@ module Dependabot
           ]
         end
 
-        # rubocop:disable Metrics/MethodLength
-        # rubocop:disable Metrics/BlockLength
         def compile_new_requirement_files
           SharedHelpers.in_a_temporary_directory do
             write_updated_dependency_files
@@ -76,7 +78,7 @@ module Dependabot
               run_pip_compile_command(
                 "#{SharedHelpers.escape_command(name_part)}=="\
                 "#{SharedHelpers.escape_command(version_part)}",
-                escape_command_str: false
+                allow_unsafe_shell_command: true
               )
               # Run pip-compile a second time, without an update argument, to
               # ensure it resets the right comments.
@@ -102,8 +104,6 @@ module Dependabot
             end.compact
           end
         end
-        # rubocop:enable Metrics/MethodLength
-        # rubocop:enable Metrics/BlockLength
 
         def update_manifest_files
           dependency_files.map do |file|
@@ -131,7 +131,7 @@ module Dependabot
                   reject { |file| updated_filenames.include?(file.name) }
 
           args = dependency.to_h
-          args = Hash[args.keys.map { |k| [k.to_sym, args[k]] }]
+          args = args.keys.map { |k| [k.to_sym, args[k]] }.to_h
           args[:requirements] = new_reqs
           args[:previous_requirements] = old_reqs
 
@@ -142,9 +142,13 @@ module Dependabot
           ).updated_dependency_files
         end
 
-        def run_command(cmd, env: python_env, escape_command_str: true)
+        def run_command(cmd, env: python_env, allow_unsafe_shell_command: false)
           start = Time.now
-          command = escape_command_str ? SharedHelpers.escape_command(cmd) : cmd
+          command = if allow_unsafe_shell_command
+                      cmd
+                    else
+                      SharedHelpers.escape_command(cmd)
+                    end
           stdout, process = Open3.capture2e(env, command)
           time_taken = Time.now - start
 
@@ -160,27 +164,12 @@ module Dependabot
           )
         end
 
-        def run_pip_compile_command(command, escape_command_str: true)
+        def run_pip_compile_command(command, allow_unsafe_shell_command: false)
           run_command("pyenv local #{python_version}")
-          run_command(command, escape_command_str: escape_command_str)
-        rescue SharedHelpers::HelperSubprocessFailed => e
-          original_error ||= e
-          msg = e.message
-
-          relevant_error =
-            if error_suggests_bad_python_version?(msg) then original_error
-            else e
-            end
-
-          raise relevant_error unless error_suggests_bad_python_version?(msg)
-          raise relevant_error if user_specified_python_version
-          raise relevant_error if python_version == "2.7.16"
-
-          @python_version = "2.7.16"
-          retry
-        ensure
-          @python_version = nil
-          FileUtils.remove_entry(".python-version", true)
+          run_command(
+            command,
+            allow_unsafe_shell_command: allow_unsafe_shell_command
+          )
         end
 
         def python_env
@@ -196,12 +185,6 @@ module Dependabot
           end
 
           env
-        end
-
-        def error_suggests_bad_python_version?(message)
-          return true if message.include?("not find a version that satisfies")
-
-          message.include?('Command "python setup.py egg_info" failed')
         end
 
         def write_updated_dependency_files
@@ -228,9 +211,7 @@ module Dependabot
         end
 
         def install_required_python
-          if run_command("pyenv versions").include?("#{python_version}\n")
-            return
-          end
+          return if run_command("pyenv versions").include?("#{python_version}\n")
 
           run_command("pyenv install -s #{python_version}")
           run_command("pyenv exec pip install -r "\
@@ -239,9 +220,7 @@ module Dependabot
 
         def sanitized_setup_file_content(file)
           @sanitized_setup_file_content ||= {}
-          if @sanitized_setup_file_content[file.name]
-            return @sanitized_setup_file_content[file.name]
-          end
+          return @sanitized_setup_file_content[file.name] if @sanitized_setup_file_content[file.name]
 
           @sanitized_setup_file_content[file.name] =
             SetupFileSanitizer.
@@ -331,9 +310,7 @@ module Dependabot
         def remove_new_warnings(updated_content, original_content)
           content = updated_content
 
-          if content.match?(WARNINGS) && !original_content.match?(WARNINGS)
-            content = content.sub(WARNINGS, "\n")
-          end
+          content = content.sub(WARNINGS, "\n") if content.match?(WARNINGS) && !original_content.match?(WARNINGS)
 
           if content.match?(UNSAFE_NOTE) &&
              !original_content.match?(UNSAFE_NOTE)
@@ -420,33 +397,45 @@ module Dependabot
         end
 
         def pip_compile_options(filename)
-          current_requirements_file_name = filename.sub(/\.in$/, ".txt")
-
-          requirements_file =
-            dependency_files.
-            find { |f| f.name == current_requirements_file_name }
-
-          return unless requirements_file
-
           options = ["--build-isolation"]
+          options += pip_compile_index_options
 
-          if requirements_file.content.include?("--hash=sha")
-            options << "--generate-hashes"
-          end
-
-          if includes_unsafe_packages?(requirements_file.content)
-            options << "--allow-unsafe"
-          end
-
-          unless requirements_file.content.include?("# via ")
-            options << "--no-annotate"
-          end
-
-          unless requirements_file.content.include?("autogenerated by pip-c")
-            options << "--no-header"
+          if (requirements_file = compiled_file_for_filename(filename))
+            options += pip_compile_options_from_compiled_file(requirements_file)
           end
 
           options.join(" ")
+        end
+
+        def pip_compile_options_from_compiled_file(requirements_file)
+          options = ["--output-file=#{requirements_file.name}"]
+
+          options << "--no-emit-index-url" unless requirements_file.content.include?("index-url http")
+
+          options << "--generate-hashes" if requirements_file.content.include?("--hash=sha")
+
+          options << "--allow-unsafe" if includes_unsafe_packages?(requirements_file.content)
+
+          options << "--no-annotate" unless requirements_file.content.include?("# via ")
+
+          options << "--no-header" unless requirements_file.content.include?("autogenerated by pip-c")
+
+          options << "--pre" if requirements_file.content.include?("--pre")
+          options
+        end
+
+        def pip_compile_index_options
+          credentials.
+            select { |cred| cred["type"] == "python_index" }.
+            map do |cred|
+              authed_url = AuthedUrlBuilder.authed_url(credential: cred)
+
+              if cred["replaces-base"]
+                "--index-url=#{authed_url}"
+              else
+                "--extra-index-url=#{authed_url}"
+              end
+            end
         end
 
         def includes_unsafe_packages?(content)
@@ -461,14 +450,29 @@ module Dependabot
 
           files_from_compiled_files =
             pip_compile_files.map(&:name).select do |fn|
-              compiled_file = dependency_files.
-                              find { |f| f.name == fn.gsub(/\.in$/, ".txt") }
+              compiled_file = compiled_file_for_filename(fn)
               compiled_file_includes_dependency?(compiled_file)
             end
 
           filenames = [*files_from_reqs, *files_from_compiled_files].uniq
 
           order_filenames_for_compilation(filenames)
+        end
+
+        def compiled_file_for_filename(filename)
+          compiled_file =
+            compiled_files.
+            find { |f| f.content.match?(output_file_regex(filename)) }
+
+          compiled_file ||=
+            compiled_files.
+            find { |f| f.name == filename.gsub(/\.in$/, ".txt") }
+
+          compiled_file
+        end
+
+        def output_file_regex(filename)
+          "--output-file[=\s]+.*\s#{Regexp.escape(filename)}\s*$"
         end
 
         def compiled_file_includes_dependency?(compiled_file)
@@ -481,9 +485,8 @@ module Dependabot
           matches.any? { |m| normalise(m[:name]) == dependency.name }
         end
 
-        # See https://www.python.org/dev/peps/pep-0503/#normalized-names
         def normalise(name)
-          name.downcase.gsub(/[-_.]+/, "-")
+          NameNormaliser.normalise(name)
         end
 
         # If the files we need to update require one another then we need to
@@ -523,60 +526,45 @@ module Dependabot
         end
 
         def python_version
-          # TODO: Add better Python version detection using dependency versions
-          # (e.g., Django 2.x implies Python 3)
           @python_version ||=
             user_specified_python_version ||
-            python_version_from_compiled_requirements ||
+            python_version_matching_imputed_requirements ||
             PythonVersions::PRE_INSTALLED_PYTHON_VERSIONS.first
         end
 
         def user_specified_python_version
-          file_version = python_version_file&.content&.strip
-          file_version ||= runtime_file_python_version
+          return unless python_requirement_parser.user_specified_requirements.any?
 
-          return unless file_version
-          return unless pyenv_versions.include?("#{file_version}\n")
-
-          file_version
+          user_specified_requirements =
+            python_requirement_parser.user_specified_requirements.
+            map { |r| Python::Requirement.requirements_array(r) }
+          python_version_matching(user_specified_requirements)
         end
 
-        def runtime_file_python_version
-          return unless runtime_file
-
-          runtime_file.content.match(/(?<=python-).*/)&.to_s&.strip
+        def python_version_matching_imputed_requirements
+          compiled_file_python_requirement_markers =
+            python_requirement_parser.imputed_requirements.map do |r|
+              Dependabot::Python::Requirement.new(r)
+            end
+          python_version_matching(compiled_file_python_requirement_markers)
         end
 
-        def python_version_from_compiled_requirements
+        def python_version_matching(requirements)
           PythonVersions::SUPPORTED_VERSIONS_TO_ITERATE.find do |version_string|
             version = Python::Version.new(version_string)
-            compiled_file_python_requirement_markers.all? do |req|
+            requirements.all? do |req|
+              next req.any? { |r| r.satisfied_by?(version) } if req.is_a?(Array)
+
               req.satisfied_by?(version)
             end
           end
         end
 
-        def compiled_file_python_requirement_markers
-          @python_requirement_strings ||=
-            compiled_files.flat_map do |file|
-              file.content.lines.
-                select { |l| l.include?(";") && l.include?("python") }.
-                map { |l| l.match(/python_version(?<req>.*?["'].*?['"])/) }.
-                compact.
-                map { |re| re.named_captures.fetch("req").gsub(/['"]/, "") }.
-                select do |r|
-                  requirement_class.new(r)
-                  true
-                rescue Gem::Requirement::BadRequirementError
-                  false
-                end
-            end
-
-          @python_requirement_strings.map { |r| requirement_class.new(r) }
-        end
-
-        def pyenv_versions
-          @pyenv_versions ||= run_command("pyenv install --list")
+        def python_requirement_parser
+          @python_requirement_parser ||=
+            FileParser::PythonRequirementParser.new(
+              dependency_files: dependency_files
+            )
         end
 
         def pre_installed_python?(version)
@@ -597,18 +585,6 @@ module Dependabot
 
         def setup_cfg_files
           dependency_files.select { |f| f.name.end_with?("setup.cfg") }
-        end
-
-        def python_version_file
-          dependency_files.find { |f| f.name == ".python-version" }
-        end
-
-        def runtime_file
-          dependency_files.find { |f| f.name.end_with?("runtime.txt") }
-        end
-
-        def requirement_class
-          Python::Requirement
         end
       end
       # rubocop:enable Metrics/ClassLength

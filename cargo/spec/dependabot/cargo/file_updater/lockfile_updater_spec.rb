@@ -46,7 +46,7 @@ RSpec.describe Dependabot::Cargo::FileUpdater::LockfileUpdater do
   let(:previous_requirements) do
     [{ file: "Cargo.toml", requirement: "0.1.12", groups: [], source: nil }]
   end
-  let(:tmp_path) { Dependabot::SharedHelpers::BUMP_TMP_DIR_PATH }
+  let(:tmp_path) { Dependabot::Utils::BUMP_TMP_DIR_PATH }
 
   before { Dir.mkdir(tmp_path) unless Dir.exist?(tmp_path) }
 
@@ -76,8 +76,8 @@ RSpec.describe Dependabot::Cargo::FileUpdater::LockfileUpdater do
       end
 
       context "because an existing requirement is no good" do
-        let(:manifest_fixture_name) { "yanked_version" }
-        let(:lockfile_fixture_name) { "yanked_version" }
+        let(:manifest_fixture_name) { "missing_version" }
+        let(:lockfile_fixture_name) { "missing_version" }
 
         it "raises a helpful error" do
           expect { updater.updated_lockfile_content }.
@@ -95,15 +95,28 @@ RSpec.describe Dependabot::Cargo::FileUpdater::LockfileUpdater do
         expect(updated_lockfile_content).
           to include(%(name = "time"\nversion = "0.1.40"))
         expect(updated_lockfile_content).to include(
-          "d825be0eb33fda1a7e68012d51e9c7f451dc1a69391e7fdc197060bb8c56667b"
+          <<~CHECKSUM
+            checksum = "d825be0eb33fda1a7e68012d51e9c7f451dc1a69391e7fdc197060bb8c56667b"
+          CHECKSUM
         )
         expect(updated_lockfile_content).to_not include(
-          "d5d788d3aa77bc0ef3e9621256885555368b47bd495c13dd2e7413c89f845520"
+          <<~CHECKSUM
+            checksum = "d5d788d3aa77bc0ef3e9621256885555368b47bd495c13dd2e7413c89f845520"
+          CHECKSUM
         )
       end
 
       context "with a binary specified" do
         let(:manifest_fixture_name) { "binary" }
+
+        it "updates the dependency version in the lockfile" do
+          expect(updated_lockfile_content).
+            to include(%(name = "time"\nversion = "0.1.40"))
+        end
+      end
+
+      context "with a default-run specified" do
+        let(:manifest_fixture_name) { "default_run" }
 
         it "updates the dependency version in the lockfile" do
           expect(updated_lockfile_content).
@@ -174,13 +187,27 @@ RSpec.describe Dependabot::Cargo::FileUpdater::LockfileUpdater do
         end
       end
 
+      context "with an old format lockfile" do
+        let(:manifest_fixture_name) { "old_lockfile" }
+        let(:lockfile_fixture_name) { "old_lockfile" }
+
+        it "updates the lockfile to the new version" do
+          expect(updated_lockfile_content).to include(
+            <<~CHECKSUM
+              checksum = "d825be0eb33fda1a7e68012d51e9c7f451dc1a69391e7fdc197060bb8c56667b"
+            CHECKSUM
+          )
+          expect(updated_lockfile_content).to_not include("[metadata]")
+        end
+      end
+
       context "with a git dependency" do
         let(:manifest_fixture_name) { "git_dependency" }
         let(:lockfile_fixture_name) { "git_dependency" }
 
         let(:dependency_name) { "utf8-ranges" }
         let(:dependency_version) do
-          "b7c73859eb0507d378b9d0a4d9ae2a0c653267f7"
+          "8d38a931b7e34f9da339c058cbbca6ded624ea58"
         end
         let(:dependency_previous_version) do
           "83141b376b93484341c68fbca3ca110ae5cd2708"
@@ -202,7 +229,7 @@ RSpec.describe Dependabot::Cargo::FileUpdater::LockfileUpdater do
 
         it "updates the dependency version in the lockfile" do
           expect(updated_lockfile_content).
-            to include("utf8-ranges#b7c73859eb0507d378b9d0a4d9ae2a0c653267f7")
+            to include("utf8-ranges#8d38a931b7e34f9da339c058cbbca6ded624ea58")
         end
 
         context "with an ssh URl" do
@@ -226,16 +253,8 @@ RSpec.describe Dependabot::Cargo::FileUpdater::LockfileUpdater do
           it "updates the dependency version in the lockfile" do
             expect(updated_lockfile_content).
               to include("git+ssh://git@github.com/BurntSushi/utf8-ranges#"\
-                         "b7c73859eb0507d378b9d0a4d9ae2a0c653267f7")
+                         "8d38a931b7e34f9da339c058cbbca6ded624ea58")
             expect(updated_lockfile_content).to_not include("git+https://")
-
-            expect(updated_lockfile_content).to include(
-              "[metadata]\n"\
-              '"checksum utf8-ranges 1.0.3 (git+ssh://git@github.com/'\
-              "BurntSushi/utf8-ranges)\" = \"<none>\"\n"\
-              '"checksum utf8-ranges-parent 1.0.2 (git+ssh://git@github.com/'\
-              "dependabot-fixtures/utf8-ranges)\" = \"<none>\""
-            )
 
             content = updated_lockfile_content
             expect(content.scan(/name = "utf8-ranges"/).count).to eq(1)
@@ -328,6 +347,16 @@ RSpec.describe Dependabot::Cargo::FileUpdater::LockfileUpdater do
         end
       end
 
+      context "when there is a linked dependency" do
+        let(:dependency_files) { [manifest, lockfile] }
+        let(:manifest_fixture_name) { "linked_dependency" }
+
+        it "updates the dependency version in the lockfile" do
+          expect(updated_lockfile_content).
+            to include(%(name = "time"\nversion = "0.1.40"))
+        end
+      end
+
       context "when there is a workspace" do
         let(:dependency_files) { [manifest, lockfile, workspace_child] }
         let(:manifest_fixture_name) { "workspace_root" }
@@ -352,6 +381,52 @@ RSpec.describe Dependabot::Cargo::FileUpdater::LockfileUpdater do
             previous_requirements: [{
               requirement: "=0.4.0",
               file: "lib/sub_crate/Cargo.toml",
+              groups: ["dependencies"],
+              source: nil
+            }],
+            package_manager: "cargo"
+          )
+        end
+
+        it "updates the dependency version in the lockfile" do
+          expect(updated_lockfile_content).
+            to include(%(name = "log"\nversion = "0.4.1"))
+          expect(updated_lockfile_content).to include(
+            "89f010e843f2b1a31dbd316b3b8d443758bc634bed37aabade59c686d644e0a2"
+          )
+          expect(updated_lockfile_content).to_not include(
+            "b3a89a0c46ba789b8a247d4c567aed4d7c68e624672d238b45cc3ec20dc9f940"
+          )
+        end
+      end
+
+      context "when there's a virtual workspace" do
+        let(:manifest_fixture_name) { "virtual_workspace_root" }
+        let(:lockfile_fixture_name) { "virtual_workspace" }
+        let(:dependency_files) do
+          [manifest, lockfile, workspace_child]
+        end
+        let(:workspace_child) do
+          Dependabot::DependencyFile.new(
+            name: "src/sub_crate/Cargo.toml",
+            content: fixture("manifests", "workspace_child")
+          )
+        end
+
+        let(:dependency) do
+          Dependabot::Dependency.new(
+            name: "log",
+            version: "0.4.1",
+            requirements: [{
+              requirement: "=0.4.1",
+              file: "src/sub_crate/Cargo.toml",
+              groups: ["dependencies"],
+              source: nil
+            }],
+            previous_version: "0.4.0",
+            previous_requirements: [{
+              requirement: "=0.4.0",
+              file: "src/sub_crate/Cargo.toml",
               groups: ["dependencies"],
               source: nil
             }],

@@ -5,8 +5,7 @@ require "dependabot/dependency"
 require "dependabot/dependency_file"
 require "dependabot/python/update_checker/pipenv_version_resolver"
 
-namespace = Dependabot::Python::UpdateChecker
-RSpec.describe namespace::PipenvVersionResolver do
+RSpec.describe Dependabot::Python::UpdateChecker::PipenvVersionResolver do
   let(:resolver) do
     described_class.new(
       dependency: dependency,
@@ -115,36 +114,9 @@ RSpec.describe namespace::PipenvVersionResolver do
         expect { subject }.
           to raise_error(Dependabot::DependencyFileNotResolvable) do |error|
             expect(error.message).to start_with(
-              "CRITICAL:pipenv.patched.notpip._internal.index:"\
+              "CRITICAL:pipenv.patched.notpip._internal.index.package_finder:"\
               "Could not find a version that satisfies the requirement "\
               "pytest==10.4.0"
-            )
-          end
-      end
-    end
-
-    context "when the Python version conflicts with another dependency" do
-      let(:pipfile_fixture_name) { "unresolvable_python_version" }
-      let(:dependency_files) { [pipfile] }
-
-      let(:dependency_name) { "pytest" }
-      let(:dependency_version) { "3.4.0" }
-      let(:dependency_requirements) do
-        [{
-          file: "Pipfile",
-          requirement: "==3.4.0",
-          groups: ["develop"],
-          source: nil
-        }]
-      end
-
-      it "raises a helpful error" do
-        expect { subject }.
-          to raise_error(Dependabot::DependencyFileNotResolvable) do |error|
-            expect(error.message).to eq(
-              "pipenv.patched.notpip._internal.exceptions."\
-              "UnsupportedPythonVersion: futures requires Python '>=2.6, <3' "\
-              "but the running Python is 3.7.3"
             )
           end
       end
@@ -219,6 +191,19 @@ RSpec.describe namespace::PipenvVersionResolver do
       let(:lockfile_fixture_name) { "required_python.lock" }
       it { is_expected.to eq(Gem::Version.new("2.18.4")) }
 
+      context "that comes from a Poetry file and includes || logic" do
+        let(:pipfile_fixture_name) { "exact_version" }
+        let(:dependency_files) { [pipfile, pyproject] }
+        let(:pyproject) do
+          Dependabot::DependencyFile.new(
+            name: "pyproject.toml",
+            content: fixture("pyproject_files", "pyproject.toml")
+          )
+        end
+
+        it { is_expected.to eq(Gem::Version.new("2.18.4")) }
+      end
+
       context "that is invalid" do
         let(:pipfile_fixture_name) { "required_python_invalid" }
 
@@ -242,7 +227,7 @@ RSpec.describe namespace::PipenvVersionResolver do
                 to start_with("Dependabot detected the following Python")
               expect(error.message).to include("3.4.*")
               expect(error.message).
-                to include("supported in Dependabot: 3.8-dev, 3.7.3, 3.7.2")
+                to include("supported in Dependabot: 3.9.5, 3.9.4, 3.9.3")
             end
         end
       end
@@ -260,33 +245,15 @@ RSpec.describe namespace::PipenvVersionResolver do
             source: nil
           }]
         end
-        let(:updated_requirement) { ">= 3.4.0, <= 3.8.1" }
+        let(:updated_requirement) { ">= 3.4.0, <= 3.8.2" }
 
-        it { is_expected.to eq(Gem::Version.new("3.8.1")) }
-
-        context "due to a version in the lockfile" do
-          let(:pipfile_fixture_name) { "required_python_implicit_2" }
-          let(:lockfile_fixture_name) { "required_python_implicit_2.lock" }
-
-          it { is_expected.to eq(Gem::Version.new("3.8.1")) }
+        it "raises an error" do
+          expect { subject }.to raise_error(Dependabot::DependencyFileNotResolvable) do |error|
+            expect(error.message).to include(
+              "SyntaxError while installing dependencies. Is one of the dependencies not Python 3 compatible?"
+            )
+          end
         end
-      end
-
-      context "where updating to the latest would break Python compatibility" do
-        let(:pipfile_fixture_name) { "required_python_blocking" }
-        let(:dependency_name) { "django" }
-        let(:dependency_version) { "1.1.14" }
-        let(:dependency_requirements) do
-          [{
-            file: "Pipfile",
-            requirement: "==1.1.14",
-            groups: ["default"],
-            source: nil
-          }]
-        end
-        let(:updated_requirement) { ">= 1.1.14, <= 2.1.4" }
-
-        it { is_expected.to eq(Gem::Version.new("1.11.21")) }
       end
 
       context "for a resolution that has caused trouble in the past" do
@@ -304,21 +271,6 @@ RSpec.describe namespace::PipenvVersionResolver do
         end
         let(:updated_requirement) { ">= 3.4.0, <= 6.14.6" }
         it { is_expected.to eq(Gem::Version.new("6.14.6")) }
-      end
-    end
-
-    context "with an unfetchable requirement" do
-      let(:dependency_files) { [pipfile] }
-      let(:pipfile_fixture_name) { "bad_requirement" }
-
-      it "raises a helpful error" do
-        expect { subject }.
-          to raise_error(Dependabot::DependencyFileNotResolvable) do |error|
-            expect(error.message).to eq(
-              "packaging.specifiers.InvalidSpecifier: "\
-              "Invalid specifier: '3.4.0'"
-            )
-          end
       end
     end
 
@@ -341,7 +293,7 @@ RSpec.describe namespace::PipenvVersionResolver do
           expect { subject }.
             to raise_error(Dependabot::GitDependenciesNotReachable) do |error|
               expect(error.dependency_urls).
-                to eq(["https://github.com/greysteil/django.git"])
+                to eq(["https://github.com/user/django.git"])
             end
         end
       end
@@ -372,7 +324,7 @@ RSpec.describe namespace::PipenvVersionResolver do
             "password" => "token"
           }, {
             "type" => "python_index",
-            "index-url" => "https://pypi.python.org/simple"
+            "index-url" => "https://pypi.org/simple"
           }]
         end
 
@@ -434,6 +386,24 @@ RSpec.describe namespace::PipenvVersionResolver do
             expect(error.message).to include(
               "Could not find a version that matches "\
               "chardet<3.1.0,==3.0.0,>=3.0.2\n"
+            )
+          end
+      end
+    end
+
+    context "with a missing system libary" do
+      # NOTE: Attempt to update an unrelated dependency (requests) to cause
+      # resolution to fail for rtree which has a system dependency on
+      # libspatialindex which isn't installed in dependabot-core's Dockerfile.
+      let(:dependency_files) do
+        project_dependency_files("pipenv/missing-system-library")
+      end
+
+      it "raises a helpful error" do
+        expect { subject }.
+          to raise_error(Dependabot::DependencyFileNotResolvable) do |error|
+            expect(error.message).to include(
+              "Pipenv failed to install \"rtree\""
             )
           end
       end

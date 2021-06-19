@@ -54,15 +54,14 @@ module Dependabot
         end
 
         # rubocop:disable Metrics/PerceivedComplexity
-        # rubocop:disable Metrics/CyclomaticComplexity
         def updated_requirement(req)
           req_string = req[:requirement].strip
           or_string_reqs = req_string.split(OR_SEPARATOR)
           or_separator = req_string.match(OR_SEPARATOR)&.to_s || " || "
           numeric_or_string_reqs = or_string_reqs.
-                                   reject { |r| r.start_with?("dev-") }
+                                   reject { |r| r.strip.start_with?("dev-") }
           branch_or_string_reqs = or_string_reqs.
-                                  select { |r| r.start_with?("dev-") }
+                                  select { |r| r.strip.start_with?("dev-") }
 
           return req unless req_string.match?(/\d/)
           return req if numeric_or_string_reqs.none?
@@ -83,7 +82,6 @@ module Dependabot
           new_req.merge(requirement: new_req_string)
         end
         # rubocop:enable Metrics/PerceivedComplexity
-        # rubocop:enable Metrics/CyclomaticComplexity
 
         def updated_alias(req)
           req_string = req[:requirement]
@@ -98,14 +96,15 @@ module Dependabot
           req.merge(requirement: new_req)
         end
 
+        # rubocop:disable Metrics/PerceivedComplexity
         def widen_requirement(req, or_separator)
           current_requirement = req[:requirement]
           reqs = current_requirement.strip.split(SEPARATOR).map(&:strip)
 
           updated_requirement =
-            if reqs.any? { |r| r.start_with?("^") }
+            if reqs.any? { |r| r.strip.start_with?("^") }
               update_caret_requirement(current_requirement, or_separator)
-            elsif reqs.any? { |r| r.start_with?("~") }
+            elsif reqs.any? { |r| r.strip.start_with?("~") }
               update_tilda_requirement(current_requirement, or_separator)
             elsif reqs.any? { |r| r.include?("*") }
               update_wildcard_requirement(current_requirement, or_separator)
@@ -117,6 +116,7 @@ module Dependabot
 
           req.merge(requirement: updated_requirement)
         end
+        # rubocop:enable Metrics/PerceivedComplexity
 
         def update_requirement_version(req, or_separator)
           current_requirement = req[:requirement]
@@ -144,9 +144,7 @@ module Dependabot
         def update_version_string(req_string)
           req_string.
             sub(VERSION_REGEX) do |old_version|
-              unless req_string.match?(/[~*\^]/)
-                next latest_resolvable_version.to_s
-              end
+              next latest_resolvable_version.to_s unless req_string.match?(/[~*\^]/)
 
               old_parts = old_version.split(".")
               new_parts = latest_resolvable_version.to_s.split(".").
@@ -163,7 +161,7 @@ module Dependabot
 
         def update_caret_requirement(req_string, or_separator)
           caret_requirements =
-            req_string.split(SEPARATOR).select { |r| r.start_with?("^") }
+            req_string.split(SEPARATOR).select { |r| r.strip.start_with?("^") }
           version_parts = latest_resolvable_version.segments
 
           min_existing_precision =
@@ -181,7 +179,7 @@ module Dependabot
 
         def update_tilda_requirement(req_string, or_separator)
           tilda_requirements =
-            req_string.split(SEPARATOR).select { |r| r.start_with?("~") }
+            req_string.split(SEPARATOR).select { |r| r.strip.start_with?("~") }
           precision = tilda_requirements.map { |r| r.split(".").count }.min
 
           version_parts = latest_resolvable_version.segments.first(precision)

@@ -18,16 +18,23 @@ RSpec.describe Dependabot::PullRequestCreator::BranchNamer do
   let(:dependencies) { [dependency] }
   let(:dependency) do
     Dependabot::Dependency.new(
-      name: "business",
-      version: "1.5.0",
-      previous_version: "1.4.0",
+      name: dependency_name,
+      version: dependency_version,
+      previous_version: previous_version,
       package_manager: "dummy",
-      requirements:
-        [{ file: "Gemfile", requirement: "~> 1.5.0", groups: [], source: nil }],
-      previous_requirements:
-        [{ file: "Gemfile", requirement: "~> 1.4.0", groups: [], source: nil }]
+      requirements: requirements,
+      previous_requirements: previous_requirements
     )
   end
+  let(:dependency_name) { "business" }
+  let(:dependency_version) { "1.5.0" }
+  let(:requirements) do
+    [{ file: "Gemfile", requirement: "~> 1.5.0", groups: [], source: nil }]
+  end
+  let(:previous_requirements) do
+    [{ file: "Gemfile", requirement: "~> 1.4.0", groups: [], source: nil }]
+  end
+  let(:previous_version) { "1.4.0" }
   let(:files) { [gemfile] }
   let(:target_branch) { nil }
 
@@ -268,6 +275,77 @@ RSpec.describe Dependabot::PullRequestCreator::BranchNamer do
       end
     end
 
+    context "with an @ in the name" do
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "@storybook/addon-knobs",
+          version: "5.1.9",
+          previous_version: "5.0.11",
+          package_manager: "npm_and_yarn",
+          requirements: []
+        )
+      end
+
+      it "strips @ character" do
+        expect(new_branch_name).
+          to eq("dependabot/npm_and_yarn/storybook/addon-knobs-5.1.9")
+      end
+    end
+
+    context "with square brackets in the name" do
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "werkzeug[watchdog]",
+          version: "0.16.0",
+          previous_version: "0.15.0",
+          package_manager: "pip",
+          requirements: []
+        )
+      end
+
+      it "replaces the brackets with hyphens" do
+        expect(new_branch_name).
+          to eq("dependabot/pip/werkzeug-watchdog--0.16.0")
+      end
+    end
+
+    context "with an invalid control character name" do
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "werk\1zeug",
+          version: "0.16.0",
+          previous_version: "0.15.0",
+          package_manager: "pip",
+          requirements: []
+        )
+      end
+
+      it "strips the invalid character" do
+        expect(new_branch_name).
+          to eq("dependabot/pip/werkzeug-0.16.0")
+      end
+    end
+
+    context "with a requirement only" do
+      let(:previous_version) { nil }
+      let(:requirements) do
+        [{
+          file: "Gemfile",
+          requirement: requirement_string,
+          groups: [],
+          source: nil
+        }]
+      end
+      let(:requirement_string) { "~> 1.5.0" }
+
+      it { is_expected.to eq("dependabot/dummy/business-tw-1.5.0") }
+
+      context "that has a trailing dot" do
+        let(:requirement_string) { "^7." }
+        it { is_expected.to eq("dependabot/dummy/business-tw-7") }
+      end
+    end
+
     context "with SHA-1 versions" do
       let(:dependency) do
         Dependabot::Dependency.new(
@@ -366,6 +444,134 @@ RSpec.describe Dependabot::PullRequestCreator::BranchNamer do
         it "includes the tag rather than the SHA" do
           expect(new_branch_name).to eq("dependabot/docker/ubuntu-17.10")
         end
+      end
+    end
+
+    context "with multiple previous source refs" do
+      let(:dependency_name) { "actions/checkout" }
+      let(:dependency_version) { "aabbfeb2ce60b5bd82389903509092c4648a9713" }
+      let(:previous_version) { nil }
+      let(:requirements) do
+        [{
+          requirement: nil,
+          groups: [],
+          file: ".github/workflows/workflow.yml",
+          metadata: { declaration_string: "actions/checkout@v2.1.0" },
+          source: {
+            type: "git",
+            url: "https://github.com/actions/checkout",
+            ref: "v2.2.0",
+            branch: nil
+          }
+        }, {
+          requirement: nil,
+          groups: [],
+          file: ".github/workflows/workflow.yml",
+          metadata: { declaration_string: "actions/checkout@master" },
+          source: {
+            type: "git",
+            url: "https://github.com/actions/checkout",
+            ref: "v2.2.0",
+            branch: nil
+          }
+        }]
+      end
+      let(:previous_requirements) do
+        [{
+          requirement: nil,
+          groups: [],
+          file: ".github/workflows/workflow.yml",
+          metadata: { declaration_string: "actions/checkout@v2.1.0" },
+          source: {
+            type: "git",
+            url: "https://github.com/actions/checkout",
+            ref: "v2.1.0",
+            branch: nil
+          }
+        }, {
+          requirement: nil,
+          groups: [],
+          file: ".github/workflows/workflow.yml",
+          metadata: { declaration_string: "actions/checkout@master" },
+          source: {
+            type: "git",
+            url: "https://github.com/actions/checkout",
+            ref: "master",
+            branch: nil
+          }
+        }]
+      end
+
+      it "includes the new ref" do
+        expect(new_branch_name).to eq(
+          "dependabot/dummy/actions/checkout-v2.2.0"
+        )
+      end
+    end
+
+    context "when going from a git ref to a version requirement" do
+      let(:dependency_name) { "business" }
+      let(:dependency_version) { "v2.0.0" }
+      let(:previous_version) { nil }
+      let(:requirements) do
+        [{
+          requirement: "~> 2.0.0",
+          groups: [],
+          file: "Gemfile",
+          source: nil
+        }]
+      end
+      let(:previous_requirements) do
+        [{
+          requirement: nil,
+          groups: [],
+          file: "Gemfile",
+          source: {
+            type: "git",
+            url: "https://github.com/gocardless/business",
+            ref: "v1.2.0",
+            branch: nil
+          }
+        }]
+      end
+
+      it "includes the new version" do
+        expect(new_branch_name).to eq(
+          "dependabot/dummy/business-tw-2.0.0"
+        )
+      end
+    end
+
+    context "when going from a version requirement to a git ref" do
+      let(:dependency_name) { "business" }
+      let(:dependency_version) { "aabbfeb2ce60b5bd82389903509092c4648a9713" }
+      let(:previous_version) { "v2.0.0" }
+      let(:requirements) do
+        [{
+          requirement: nil,
+          groups: [],
+          file: "Gemfile",
+          source: {
+            type: "git",
+            url: "https://github.com/gocardless/business",
+            ref: "v2.2.0",
+            branch: nil
+          }
+        }]
+      end
+      let(:previous_requirements) do
+        [{
+          requirement: "~> 2.0.0",
+          groups: [],
+          file: "Gemfile",
+          source: nil
+        }]
+      end
+
+      it "includes the new ref" do
+        expect(new_branch_name).to eq(
+          "dependabot/dummy/business-v2.2.0"
+        )
       end
     end
   end

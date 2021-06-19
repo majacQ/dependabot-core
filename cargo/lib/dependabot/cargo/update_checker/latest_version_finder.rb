@@ -8,11 +8,13 @@ module Dependabot
     class UpdateChecker
       class LatestVersionFinder
         def initialize(dependency:, dependency_files:, credentials:,
-                       ignored_versions:, security_advisories:)
+                       ignored_versions:, raise_on_ignored: false,
+                       security_advisories:)
           @dependency          = dependency
           @dependency_files    = dependency_files
           @credentials         = credentials
           @ignored_versions    = ignored_versions
+          @raise_on_ignored    = raise_on_ignored
           @security_advisories = security_advisories
         end
 
@@ -39,8 +41,8 @@ module Dependabot
         def fetch_lowest_security_fix_version
           versions = available_versions
           versions = filter_prerelease_versions(versions)
-          versions = filter_ignored_versions(versions)
           versions = filter_vulnerable_versions(versions)
+          versions = filter_ignored_versions(versions)
           versions = filter_lower_versions(versions)
           versions.min
         end
@@ -52,8 +54,13 @@ module Dependabot
         end
 
         def filter_ignored_versions(versions_array)
-          versions_array.
-            reject { |v| ignore_reqs.any? { |r| r.satisfied_by?(v) } }
+          filtered = versions_array.
+                     reject { |v| ignore_requirements.any? { |r| r.satisfied_by?(v) } }
+          if @raise_on_ignored && filter_lower_versions(filtered).empty? && filter_lower_versions(versions_array).any?
+            raise Dependabot::AllVersionsIgnored
+          end
+
+          filtered
         end
 
         def filter_vulnerable_versions(versions_array)
@@ -62,6 +69,8 @@ module Dependabot
         end
 
         def filter_lower_versions(versions_array)
+          return versions_array unless dependency.version && version_class.correct?(dependency.version)
+
           versions_array.
             select { |version| version > version_class.new(dependency.version) }
         end
@@ -103,8 +112,8 @@ module Dependabot
           end
         end
 
-        def ignore_reqs
-          ignored_versions.map { |req| requirement_class.new(req.split(",")) }
+        def ignore_requirements
+          ignored_versions.flat_map { |req| requirement_class.requirements_array(req) }
         end
 
         def version_class

@@ -2,16 +2,12 @@
 
 require "bundler"
 
-require "dependabot/monkey_patches/bundler/definition_ruby_version_patch"
-require "dependabot/monkey_patches/bundler/definition_bundler_version_patch"
-require "dependabot/monkey_patches/bundler/git_source_patch"
-
 require "dependabot/shared_helpers"
 require "dependabot/errors"
 require "dependabot/bundler/file_updater"
-require "dependabot/git_commit_checker"
+require "dependabot/bundler/native_helpers"
+require "dependabot/bundler/helpers"
 
-# rubocop:disable Metrics/ClassLength
 module Dependabot
   module Bundler
     class FileUpdater
@@ -26,13 +22,6 @@ module Dependabot
           /(?<ending>\s*(?:RUBY VERSION|BUNDLED WITH).*)/m.freeze
         GIT_DEPENDENCIES_SECTION = /GIT\n.*?\n\n(?!GIT)/m.freeze
         GIT_DEPENDENCY_DETAILS = /GIT\n.*?\n\n/m.freeze
-        GEM_NOT_FOUND_ERROR_REGEX =
-          /
-            locked\sto\s(?<name>[^\s]+)\s\(|
-            not\sfind\s(?<name>[^\s]+)-\d|
-            has\s(?<name>[^\s]+)\slocked\sat
-          /x.freeze
-        RETRYABLE_ERRORS = [::Bundler::HTTPError].freeze
 
         # Can't be a constant because some of these don't exist in bundler
         # 1.15, which Heroku uses, which causes an exception on boot.
@@ -43,10 +32,13 @@ module Dependabot
           ]
         end
 
-        def initialize(dependencies:, dependency_files:, credentials:)
+        def initialize(dependencies:, dependency_files:,
+                       repo_contents_path: nil, credentials:, options:)
           @dependencies = dependencies
           @dependency_files = dependency_files
+          @repo_contents_path = repo_contents_path
           @credentials = credentials
+          @options = options
         end
 
         def updated_lockfile_content
@@ -54,9 +46,7 @@ module Dependabot
             begin
               updated_content = build_updated_lockfile
 
-              if lockfile.content == updated_content
-                raise "Expected content to change!"
-              end
+              raise "Expected content to change!" if lockfile.content == updated_content
 
               updated_content
             end
@@ -64,42 +54,32 @@ module Dependabot
 
         private
 
-        attr_reader :dependencies, :dependency_files, :credentials
+        attr_reader :dependencies, :dependency_files, :repo_contents_path,
+                    :credentials, :options
 
         def build_updated_lockfile
           base_dir = dependency_files.first.directory
           lockfile_body =
-            SharedHelpers.in_a_temporary_directory(base_dir) do |tmp_dir|
+            SharedHelpers.in_a_temporary_repo_directory(
+              base_dir,
+              repo_contents_path
+            ) do |tmp_dir|
               write_temporary_dependency_files
 
-              SharedHelpers.in_a_forked_process do
-                # Set the path for path gemspec correctly
-                ::Bundler.instance_variable_set(:@root, tmp_dir)
-
-                # Remove installed gems from the default Rubygems index
-                ::Gem::Specification.all =
-                  ::Gem::Specification.send(:default_stubs, "*.gemspec")
-
-                # Set auth details
-                relevant_credentials.each do |cred|
-                  token = cred["token"] ||
-                          "#{cred['username']}:#{cred['password']}"
-
-                  ::Bundler.settings.set_command_option(
-                    cred.fetch("host"),
-                    token.gsub("@", "%40F").gsub("?", "%3F")
-                  )
-                end
-
-                # Equivalent of running --full-index. Ensures recent
-                # dependencies are always fetched, and fixes Artifactory issues
-                ::Bundler::Fetcher.disable_endpoint
-
-                generate_lockfile
-              end
+              NativeHelpers.run_bundler_subprocess(
+                bundler_version: bundler_version,
+                function: "update_lockfile",
+                args: {
+                  gemfile_name: gemfile.name,
+                  lockfile_name: lockfile.name,
+                  dir: tmp_dir,
+                  credentials: credentials,
+                  dependencies: dependencies.map(&:to_h)
+                }
+              )
             end
           post_process_lockfile(lockfile_body)
-        rescue SharedHelpers::ChildProcessFailed => e
+        rescue SharedHelpers::HelperSubprocessFailed => e
           raise unless ruby_lock_error?(e)
 
           @dont_lock_ruby_version = true
@@ -136,109 +116,6 @@ module Dependabot
           end
         end
 
-        # rubocop:disable Naming/RescuedExceptionsVariableName
-        def generate_lockfile
-          dependencies_to_unlock = dependencies.map(&:name)
-
-          begin
-            definition = build_definition(dependencies_to_unlock)
-
-            old_reqs = lock_deps_being_updated_to_exact_versions(definition)
-
-            definition.resolve_remotely!
-
-            old_reqs.each do |dep_name, old_req|
-              d_dep = definition.dependencies.find { |d| d.name == dep_name }
-              if old_req == :none then definition.dependencies.delete(d_dep)
-              else d_dep.instance_variable_set(:@requirement, old_req)
-              end
-            end
-
-            definition.to_lock
-          rescue ::Bundler::GemNotFound => e
-            unlock_yanked_gem(dependencies_to_unlock, e) && retry
-          rescue ::Bundler::VersionConflict => e
-            unlock_blocking_subdeps(dependencies_to_unlock, e) && retry
-          rescue *RETRYABLE_ERRORS
-            raise if @retrying
-
-            @retrying = true
-            sleep(rand(1.0..5.0))
-            retry
-          end
-        end
-        # rubocop:enable Naming/RescuedExceptionsVariableName
-
-        def unlock_yanked_gem(dependencies_to_unlock, error)
-          raise unless error.message.match?(GEM_NOT_FOUND_ERROR_REGEX)
-
-          gem_name = error.message.match(GEM_NOT_FOUND_ERROR_REGEX).
-                     named_captures["name"]
-          raise if dependencies_to_unlock.include?(gem_name)
-
-          dependencies_to_unlock << gem_name
-        end
-
-        def unlock_blocking_subdeps(dependencies_to_unlock, error)
-          all_deps =  ::Bundler::LockfileParser.new(sanitized_lockfile_body).
-                      specs.map(&:name).map(&:to_s)
-          top_level = build_definition([]).dependencies.
-                      map(&:name).map(&:to_s)
-          allowed_new_unlocks = all_deps - top_level - dependencies_to_unlock
-
-          # Unlock any sub-dependencies that Bundler reports caused the
-          # conflict
-          potentials_deps =
-            error.cause.conflicts.values.
-            flat_map(&:requirement_trees).
-            map do |tree|
-              tree.find { |req| allowed_new_unlocks.include?(req.name) }
-            end.compact.map(&:name)
-
-          # If there's nothing more we can unlock, give up
-          raise if potentials_deps.none?
-
-          dependencies_to_unlock.append(*potentials_deps)
-        end
-
-        def build_definition(dependencies_to_unlock)
-          defn = ::Bundler::Definition.build(
-            gemfile.name,
-            lockfile.name,
-            gems: dependencies_to_unlock
-          )
-
-          # Bundler unlocks the sub-dependencies of gems it is passed even
-          # if those sub-deps are top-level dependencies. We only want true
-          # subdeps unlocked, like they were in the UpdateChecker, so we
-          # mutate the unlocked gems array.
-          unlocked = defn.instance_variable_get(:@unlock).fetch(:gems)
-          must_not_unlock = defn.dependencies.map(&:name).map(&:to_s) -
-                            dependencies_to_unlock
-          unlocked.reject! { |n| must_not_unlock.include?(n) }
-
-          defn
-        end
-
-        def lock_deps_being_updated_to_exact_versions(definition)
-          dependencies.each_with_object({}) do |dep, old_reqs|
-            defn_dep = definition.dependencies.find { |d| d.name == dep.name }
-
-            if defn_dep.nil?
-              definition.dependencies <<
-                ::Bundler::Dependency.new(dep.name, dep.version)
-              old_reqs[dep.name] = :none
-            elsif git_dependency?(dep) &&
-                  defn_dep.source.is_a?(::Bundler::Source::Git)
-              defn_dep.source.unlock!
-            elsif Gem::Version.correct?(dep.version)
-              new_req = Gem::Requirement.create("= #{dep.version}")
-              old_reqs[dep.name] = defn_dep.requirement
-              defn_dep.instance_variable_set(:@requirement, new_req)
-            end
-          end
-        end
-
         def write_ruby_version_file
           return unless ruby_version_file
 
@@ -252,6 +129,12 @@ module Dependabot
             path = file.name
             FileUtils.mkdir_p(Pathname.new(path).dirname)
             File.write(path, sanitized_gemspec_content(file.content))
+          end
+
+          specification_files.each do |file|
+            path = file.name
+            FileUtils.mkdir_p(Pathname.new(path).dirname)
+            File.write(path, file.content)
           end
         end
 
@@ -333,6 +216,7 @@ module Dependabot
             rewrite(gemspec_content)
         end
 
+        # rubocop:disable Metrics/PerceivedComplexity
         def replacement_version_for_gemspec(gemspec_content)
           return "0.0.1" unless lockfile
 
@@ -349,17 +233,7 @@ module Dependabot
           spec = gemspec_specs.find { |s| s.name == gem_name }
           spec&.version || gemspec_specs.first&.version || "0.0.1"
         end
-
-        def relevant_credentials
-          credentials.
-            select { |cred| cred["password"] || cred["token"] }.
-            select do |cred|
-              next true if cred["type"] == "git_source"
-              next true if cred["type"] == "rubygems_server"
-
-              false
-            end
-        end
+        # rubocop:enable Metrics/PerceivedComplexity
 
         def prepared_gemfile_content(file)
           content =
@@ -401,6 +275,7 @@ module Dependabot
             dependency_files.find { |f| f.name == "gems.locked" }
         end
 
+        # TODO: Stop sanitizing the lockfile once we have bundler 2 installed
         def sanitized_lockfile_body
           lockfile.content.gsub(LOCKFILE_ENDING, "")
         end
@@ -409,6 +284,7 @@ module Dependabot
           @evaled_gemfiles ||=
             dependency_files.
             reject { |f| f.name.end_with?(".gemspec") }.
+            reject { |f| f.name.end_with?(".specification") }.
             reject { |f| f.name.end_with?(".lock") }.
             reject { |f| f.name.end_with?(".ruby-version") }.
             reject { |f| f.name == "Gemfile" }.
@@ -417,14 +293,14 @@ module Dependabot
             reject(&:support_file?)
         end
 
-        def git_dependency?(dep)
-          GitCommitChecker.new(
-            dependency: dep,
-            credentials: credentials
-          ).git_dependency?
+        def specification_files
+          dependency_files.select { |f| f.name.end_with?(".specification") }
+        end
+
+        def bundler_version
+          @bundler_version ||= Helpers.bundler_version(lockfile)
         end
       end
     end
   end
 end
-# rubocop:enable Metrics/ClassLength

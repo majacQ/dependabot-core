@@ -12,6 +12,8 @@ module Dependabot
       require_relative "update_checker/multi_dependency_updater"
 
       def latest_version
+        return if git_dependency?
+
         latest_version_details&.fetch(:version)
       end
 
@@ -21,17 +23,23 @@ module Dependabot
         #
         # The above is hard. Currently we just return the latest version and
         # hope (hence this package manager is in beta!)
+        return if git_dependency?
         return nil if version_comes_from_multi_dependency_property?
         return nil if version_comes_from_dependency_set?
 
         latest_version
       end
 
+      def lowest_security_fix_version
+        lowest_security_fix_version_details&.fetch(:version)
+      end
+
       def lowest_resolvable_security_fix_version
+        return if git_dependency?
         return nil if version_comes_from_multi_dependency_property?
         return nil if version_comes_from_dependency_set?
 
-        lowest_security_fix_version_details&.fetch(:version)
+        lowest_security_fix_version
       end
 
       def latest_resolvable_version_with_no_unlock
@@ -111,7 +119,9 @@ module Dependabot
           VersionFinder.new(
             dependency: dependency,
             dependency_files: dependency_files,
+            credentials: credentials,
             ignored_versions: ignored_versions,
+            raise_on_ignored: raise_on_ignored,
             security_advisories: security_advisories
           )
       end
@@ -121,8 +131,22 @@ module Dependabot
           MultiDependencyUpdater.new(
             dependency: dependency,
             dependency_files: dependency_files,
+            credentials: credentials,
             target_version_details: latest_version_details,
-            ignored_versions: ignored_versions
+            ignored_versions: ignored_versions,
+            raise_on_ignored: raise_on_ignored
+          )
+      end
+
+      def git_dependency?
+        git_commit_checker.git_dependency?
+      end
+
+      def git_commit_checker
+        @git_commit_checker ||=
+          GitCommitChecker.new(
+            dependency: dependency,
+            credentials: credentials
           )
       end
 
