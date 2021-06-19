@@ -55,7 +55,7 @@ pandocfilters==1.4.2      # via nbconvert
 parso==0.7.0              # via jedi
 pexpect==4.8.0            # via ipython
 pickleshare==0.7.5        # via ipython
-pillow==7.2.0             # via matplotlib
+pillow==8.2.0             # via matplotlib
 prometheus-client==0.8.0  # via jupyter-server, notebook
 prompt-toolkit==3.0.5     # via ipython, jupyter-console
 ptyprocess==0.6.0         # via pexpect, terminado
@@ -64,12 +64,12 @@ pygments==2.6.1           # via ipython, jupyter-console, jupyterlab-pygments, n
 pyparsing==2.4.7          # via matplotlib, packaging
 pyrsistent==0.16.0        # via jsonschema
 python-dateutil==2.8.1    # via jupyter-client, matplotlib
-pyyaml==5.3.1             # via jupyter-contrib-nbextensions, jupyter-nbextensions-configurator
+pyyaml==5.4             # via jupyter-contrib-nbextensions, jupyter-nbextensions-configurator
 pyzmq==19.0.1             # via jupyter-client, jupyter-server, notebook, qtconsole
 qtconsole==4.7.5          # via jupyter
 qtpy==1.9.0               # via qtconsole
 resampy==0.2.2            # via librosa
-scikit-learn==0.23.1      # via librosa
+scikit-learn==0.24.2      # via librosa
 scipy==1.5.1              # via librosa, resampy, scikit-learn
 send2trash==1.5.0         # via jupyter-server, notebook
 six==1.15.0               # via absl-py, bleach, cycler, jsonschema, librosa, packaging, pyrsistent, python-dateutil, resampy, traitlets

@@ -76,12 +76,9 @@ RUN git clone https://github.com/pyenv/pyenv.git /usr/local/.pyenv \
 
 ### JAVASCRIPT
 
-# Install Node 14.0 and Yarn
+# Install Node 14.0 and npm (updated after elm)
 RUN curl -sL https://deb.nodesource.com/setup_14.x | bash - \
-  && apt-get install -y nodejs \
-  && curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - \
-  && echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list \
-  && apt-get update && apt-get install -y yarn
+  && apt-get install -y nodejs
 
 
 ### ELM
@@ -94,6 +91,10 @@ RUN npm install elm@0.18.0 \
   && mv elm /usr/local/bin/elm19 \
   && rm -f binaries-for-linux.tar.gz \
   && rm -rf ~/.npm
+
+# NOTE: This is a hack to get around the fact that elm 18 fails to install with
+# npm 7, we should look into deprecating elm 18
+RUN npm install -g npm@v7.5.4
 
 
 ### PHP
@@ -136,8 +137,8 @@ RUN add-apt-repository ppa:ondrej/php \
 ### GO
 
 # Install Go and dep
-ARG GOLANG_VERSION=1.15.2
-ARG GOLANG_CHECKSUM=b49fda1ca29a1946d6bb2a5a6982cf07ccd2aba849289508ee0f9918f6bb4552
+ARG GOLANG_VERSION=1.15.7
+ARG GOLANG_CHECKSUM=0d142143794721bb63ce6c8a6180c4062bcf8ef4715e7d6d6609f3a8282629b3
 RUN curl -o go.tar.gz https://dl.google.com/go/go${GOLANG_VERSION}.linux-amd64.tar.gz \
   && echo "$GOLANG_CHECKSUM go.tar.gz" | sha256sum -c - \
   && tar -xzf go.tar.gz -C /opt \
