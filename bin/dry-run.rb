@@ -63,6 +63,7 @@ require "json"
 require "byebug"
 require "logger"
 require "dependabot/logger"
+require "stackprof"
 
 Dependabot.logger = Logger.new($stdout)
 
@@ -103,6 +104,7 @@ $options = {
   write: false,
   clone: false,
   lockfile_only: false,
+  reject_external_code: false,
   requirements_update_strategy: nil,
   commit: nil,
   updater_options: {},
@@ -167,6 +169,10 @@ option_parse = OptionParser.new do |opts|
     $options[:lockfile_only] = true
   end
 
+  opts.on("--reject-external-code", "Reject external code") do |_value|
+    $options[:reject_external_code] = true
+  end
+
   opts_req_desc = "Options: auto, widen_ranges, bump_versions or "\
                          "bump_versions_if_necessary"
   opts.on("--requirements-update-strategy STRATEGY", opts_req_desc) do |value|
@@ -195,6 +201,11 @@ option_parse = OptionParser.new do |opts|
   opts.on("--security-updates-only",
           "Only update vulnerable dependencies") do |_value|
     $options[:security_updates_only] = true
+  end
+
+  opts.on("--profile",
+          "Profile using Stackprof. Output in `tmp/stackprof-<datetime>.dump`") do
+    $options[:profile] = true
   end
 end
 
@@ -267,9 +278,7 @@ def cached_dependency_files_read
   )
   FileUtils.mkdir_p(cache_dir) unless Dir.exist?(cache_dir)
 
-  if File.exist?(cache_manifest_path)
-    cached_manifest = File.read(cache_manifest_path)
-  end
+  cached_manifest = File.read(cache_manifest_path) if File.exist?(cache_manifest_path)
   cached_dependency_files = JSON.parse(cached_manifest) if cached_manifest
 
   all_files_cached = cached_dependency_files&.all? do |file|
@@ -316,9 +325,7 @@ def cached_dependency_files_read
     end
     # Initialize a git repo so that changed files can be diffed
     if $options[:write]
-      if File.exist?(".gitignore")
-        FileUtils.cp(".gitignore", File.join(cache_dir, ".gitignore"))
-      end
+      FileUtils.cp(".gitignore", File.join(cache_dir, ".gitignore")) if File.exist?(".gitignore")
       Dir.chdir(cache_dir) do
         system("git init . && git add . && git commit --allow-empty -m 'Init'")
       end
@@ -421,6 +428,8 @@ def handle_dependabot_error(error:, dependency:)
        "#{error_details.fetch(:'error-detail')}"
 end
 
+StackProf.start(raw: true) if $options[:profile]
+
 source = Dependabot::Source.new(
   provider: $options[:provider],
   repo: $repo_name,
@@ -454,7 +463,8 @@ parser = Dependabot::FileParsers.for_package_manager($package_manager).new(
   dependency_files: $files,
   repo_contents_path: $repo_contents_path,
   source: source,
-  credentials: $options[:credentials]
+  credentials: $options[:credentials],
+  reject_external_code: $options[:reject_external_code],
 )
 
 dependencies = cached_read("dependencies") { parser.parse }
@@ -684,6 +694,10 @@ dependencies.each do |dep|
 rescue StandardError => e
   handle_dependabot_error(error: e, dependency: dep)
 end
+
+StackProf.stop if $options[:profile]
+StackProf.results("tmp/stackprof-#{Time.now.strftime('%Y-%m-%d-%H:%M')}.dump") if $options[:profile]
+
 # rubocop:enable Metrics/BlockLength
 
 # rubocop:enable Style/GlobalVars
